@@ -69,6 +69,14 @@ elsewhere isn't guaranteed crossable in a straight line, same as any
 top-down game with water or buildings in it; the path is the reliable route,
 not the only one.
 
+Two more kinds, `tent` and `cave`, exist only to be a zone's one named
+landmark — Abraham's Tent, Elijah's Cave, The Abyss, and so on (full list in
+`server/README.md`). Placed once per zone, away from the spawn box and the
+exit path, and served as `TileMap.landmarks` alongside the tile grid. They
+give the world a place name to walk toward; nothing is behind the door yet
+— no shop, no interior — that's a deliberate seam for later, not a cut
+corner dressed up as content.
+
 ## Components
 
 ```

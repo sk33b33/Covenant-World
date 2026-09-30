@@ -101,6 +101,22 @@ to build collision and rendering against. One generator function per zone id,
 not one generic algorithm reskinned six times: Kings' city and Gospel's lake
 are structurally different maps.
 
+## Landmarks
+
+Each zone places exactly one named, solid structure — a tent or a cave —
+somewhere away from the spawn box and the exit path, via `placeLandmark` in
+`terrain.ts`. They're real places, not decoration: Abraham's Tent in Genesis,
+The Camp pitched by Exodus's oasis, The Undercroft beneath Kings, Elijah's
+Cave in the Prophets highlands (1 Kings 19), The Fisherman's Tent on
+Gospel's shore, The Abyss in Revelation (Rev 9).
+
+**Nothing is behind the door yet.** No shop, no interior, no interaction —
+walking up to one only shows its name, the same way a player's nameplate
+floats above them. That's deliberate: the seam for a real shop system is now
+in one place (`TileMap.landmarks`, served over the same `/zones/:id/terrain.json`
+the client already fetches) rather than invented alongside fake "press E"
+prompts that would have led nowhere.
+
 Walking off the map edge and walking into a tree are deliberately different:
 the first is travel to the neighbouring zone, the second is just a wall.
 Every zone connects to its neighbour through a carved path at the middle row

@@ -19,6 +19,9 @@ export const TERRAIN = {
   tree: { char: "T", walkable: false },
   rock: { char: "O", walkable: false },
   water: { char: "~", walkable: false },
+  /** A named, solid landmark — the doorway to somewhere, not yet somewhere itself. */
+  tent: { char: "^", walkable: false },
+  cave: { char: "#", walkable: false },
 } as const;
 
 export type TerrainKind = keyof typeof TERRAIN;
@@ -27,11 +30,20 @@ const BY_CHAR = new Map<string, TerrainKind>(
   (Object.keys(TERRAIN) as TerrainKind[]).map((kind) => [TERRAIN[kind].char, kind]),
 );
 
+/**
+ * A named structure a player can walk up to and read the name of. Not
+ * enterable yet — no shop or interior exists behind any of these — but
+ * placing and naming them now is the seam that work hangs off later, so a
+ * zone can already look inhabited rather than merely decorated.
+ */
+export type Landmark = { name: string; kind: "tent" | "cave"; tx: number; ty: number };
+
 export type TileMap = {
   width: number;
   height: number;
   /** Row-major, one character per tile — see TERRAIN. */
   rows: string[];
+  landmarks: Landmark[];
 };
 
 export function terrainAt(map: TileMap, tx: number, ty: number): TerrainKind {
@@ -61,17 +73,27 @@ export function buildTileMap(zone: ZoneDefinition): TileMap {
   const { width, height } = zone.tiles;
   const random = seededRandom(hash(zone.id));
   const generator = BIOMES[zone.id] ?? BIOMES.genesis;
-  const tiles = generator(zone, random);
+  const { tiles, landmark } = generator(zone, random);
 
+  // Placed by the biome, well clear of the centre — carving exit paths and
+  // clearing the spawn box afterward never touches it (see each biome's
+  // chosen offset from centre).
   carveExitPaths(tiles, zone);
   clearSpawnArea(tiles, zone);
 
-  return { width, height, rows: tiles.map((row) => row.map((kind) => TERRAIN[kind].char).join("")) };
+  return {
+    width,
+    height,
+    rows: tiles.map((row) => row.map((kind) => TERRAIN[kind].char).join("")),
+    landmarks: [landmark],
+  };
 }
 
 /* ------------------------------------------------------------- biomes */
 
-const BIOMES: Record<string, (zone: ZoneDefinition, random: Random) => Grid> = {
+type BiomeResult = { tiles: Grid; landmark: Landmark };
+
+const BIOMES: Record<string, (zone: ZoneDefinition, random: Random) => BiomeResult> = {
   genesis: genesisBiome,
   exodus: exodusBiome,
   kings: kingsBiome,
@@ -81,7 +103,7 @@ const BIOMES: Record<string, (zone: ZoneDefinition, random: Random) => Grid> = {
 };
 
 /** Eden: a garden fed by a river, woodland only at the far edges. */
-function genesisBiome(zone: ZoneDefinition, random: Random): Grid {
+function genesisBiome(zone: ZoneDefinition, random: Random): BiomeResult {
   const { width, height } = zone.tiles;
   const tiles = emptyGrid(width, height, "grass");
 
@@ -96,11 +118,15 @@ function genesisBiome(zone: ZoneDefinition, random: Random): Grid {
     });
   }
 
-  return tiles;
+  // The patriarchs' whole way of life — Abraham, Isaac, Jacob all lived
+  // under canvas, never in a house of their own building.
+  const landmark = placeLandmark(tiles, width, height, width * 0.15, height * 0.78, "tent", "Abraham's Tent");
+
+  return { tiles, landmark };
 }
 
 /** The wilderness: sand to the horizon, one oasis, wind-worn stone. */
-function exodusBiome(zone: ZoneDefinition, random: Random): Grid {
+function exodusBiome(zone: ZoneDefinition, random: Random): BiomeResult {
   const { width, height } = zone.tiles;
   const tiles = emptyGrid(width, height, "sand");
 
@@ -114,11 +140,14 @@ function exodusBiome(zone: ZoneDefinition, random: Random): Grid {
     if (distance > 3 && distance < 6 && random() < 0.3) tiles[ty][tx] = "tree";
   });
 
-  return tiles;
+  // A people who never stay anywhere long pitch camp by the water.
+  const landmark = placeLandmark(tiles, width, height, oasis.cx + 8, oasis.cy, "tent", "The Camp");
+
+  return { tiles, landmark };
 }
 
 /** The royal city: a street grid of building blocks around open plazas. */
-function kingsBiome(zone: ZoneDefinition, random: Random): Grid {
+function kingsBiome(zone: ZoneDefinition, random: Random): BiomeResult {
   const { width, height } = zone.tiles;
   const tiles = emptyGrid(width, height, "path");
   const block = 9;
@@ -143,11 +172,14 @@ function kingsBiome(zone: ZoneDefinition, random: Random): Grid {
     }
   }
 
-  return tiles;
+  // Every court kept a treasury below ground, not above it.
+  const landmark = placeLandmark(tiles, width, height, width * 0.3, height * 0.78, "cave", "The Undercroft");
+
+  return { tiles, landmark };
 }
 
 /** The highlands: dry, rocky, windswept, with a single brook. */
-function prophetsBiome(zone: ZoneDefinition, random: Random): Grid {
+function prophetsBiome(zone: ZoneDefinition, random: Random): BiomeResult {
   const { width, height } = zone.tiles;
   const tiles = emptyGrid(width, height, "grass");
 
@@ -157,11 +189,15 @@ function prophetsBiome(zone: ZoneDefinition, random: Random): Grid {
   sprinkle(tiles, width, height, random, { kind: "tree", chance: 0.01 });
   river(tiles, width, height, random, { fringe: "sand", halfWidth: 1 });
 
-  return tiles;
+  // 1 Kings 19 — a prophet hiding from a king in a cave at Horeb is this
+  // chapter in one image.
+  const landmark = placeLandmark(tiles, width, height, width * 0.82, height * 0.22, "cave", "Elijah's Cave");
+
+  return { tiles, landmark };
 }
 
 /** Galilee: a great lake filling one side of the map, reeds at its shore. */
-function gospelBiome(zone: ZoneDefinition, random: Random): Grid {
+function gospelBiome(zone: ZoneDefinition, random: Random): BiomeResult {
   const { width, height } = zone.tiles;
   const tiles = emptyGrid(width, height, "grass");
 
@@ -182,11 +218,23 @@ function gospelBiome(zone: ZoneDefinition, random: Random): Grid {
     jitter: 0.3,
   });
 
-  return tiles;
+  // Pitched on the dry shore, opposite whichever side the lake claimed —
+  // Peter and Andrew's trade, not a stranger's.
+  const landmark = placeLandmark(
+    tiles,
+    width,
+    height,
+    east ? width * 0.12 : width * 0.88,
+    height * 0.78,
+    "tent",
+    "The Fisherman's Tent",
+  );
+
+  return { tiles, landmark };
 }
 
 /** The new creation: scorched ground, dark pools, ruin rather than one wound. */
-function revelationBiome(zone: ZoneDefinition, random: Random): Grid {
+function revelationBiome(zone: ZoneDefinition, random: Random): BiomeResult {
   const { width, height } = zone.tiles;
   const tiles = emptyGrid(width, height, "grass");
 
@@ -203,7 +251,10 @@ function revelationBiome(zone: ZoneDefinition, random: Random): Grid {
     });
   }
 
-  return tiles;
+  // Revelation 9 — smoke rising from a shaft into the bottomless pit.
+  const landmark = placeLandmark(tiles, width, height, width * 0.25, height * 0.25, "cave", "The Abyss");
+
+  return { tiles, landmark };
 }
 
 /* ------------------------------------------------------------- generation toolkit */
@@ -243,6 +294,46 @@ function patch(
     if (distanceSq < edge) tiles[ty][tx] = opts.kind;
     else if (opts.fringe && distanceSq < edge + 0.5) tiles[ty][tx] = opts.fringe;
   });
+}
+
+/**
+ * Stamps a named landmark near the given point, nudged to the nearest open
+ * ground so it doesn't land in the middle of a lake or a building the biome
+ * already placed. Always somewhere — worst case it overwrites whatever's at
+ * the exact target rather than silently vanishing the landmark.
+ */
+function placeLandmark(
+  tiles: Grid,
+  width: number,
+  height: number,
+  targetX: number,
+  targetY: number,
+  kind: "tent" | "cave",
+  name: string,
+): Landmark {
+  const OPEN: TerrainKind[] = ["grass", "path", "sand", "flowers"];
+  const originX = Math.round(clampNumber(targetX, 2, width - 3));
+  const originY = Math.round(clampNumber(targetY, 2, height - 3));
+
+  for (let radius = 0; radius < 10; radius++) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+        const tx = originX + dx;
+        const ty = originY + dy;
+        if (!OPEN.includes(tiles[ty]?.[tx] as TerrainKind)) continue;
+        tiles[ty][tx] = kind;
+        return { name, kind, tx, ty };
+      }
+    }
+  }
+
+  tiles[originY][originX] = kind;
+  return { name, kind, tx: originX, ty: originY };
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 /** A wandering line of water from top to bottom of the zone. */

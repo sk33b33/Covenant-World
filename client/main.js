@@ -309,6 +309,8 @@ function draw() {
   collectTallTerrain(camera, standing);
   standing.sort((a, b) => a.y - b.y);
   for (const item of standing) item.draw();
+
+  drawLandmarkLabels(camera);
 }
 
 // One palette + decoration set per chapter energy, matching the zone's theme
@@ -500,17 +502,124 @@ function collectTallTerrain(camera, into) {
   for (let ty = fromY; ty <= toY; ty++) {
     for (let tx = fromX; tx <= toX; tx++) {
       const kind = tileAt(tx, ty);
-      if (kind !== "tree" && kind !== "rock") continue;
+      if (kind !== "tree" && kind !== "rock" && kind !== "tent" && kind !== "cave") continue;
       const x = tx * size - camera.x;
       const y = ty * size - camera.y;
+      const noise = tileNoise(tx, ty);
       into.push({
         y: ty * size + size,
-        draw: () =>
-          kind === "tree"
-            ? drawTree(x, y, tileNoise(tx, ty), theme.tree)
-            : drawRock(x, y, tileNoise(tx, ty), theme.rock),
+        draw: () => {
+          if (kind === "tree") return drawTree(x, y, noise, theme.tree);
+          if (kind === "rock") return drawRock(x, y, noise, theme.rock);
+          if (kind === "tent") return drawTent(x, y, noise);
+          return drawCave(x, y, noise);
+        },
       });
     }
+  }
+}
+
+/**
+ * A named structure — not enterable, no shop exists behind it yet, but
+ * placed and labelled now so the world already reads as inhabited. See
+ * server/src/terrain.ts placeLandmark and docs/ARCHITECTURE.md.
+ */
+function drawTent(x, y, noise) {
+  const size = config.tileSize;
+  groundShadow(x, y, size, 0.36, 0.14, 3);
+
+  const cx = x + size / 2;
+  const base = y + size - 3;
+  const peak = y + 5;
+  const fabric = ["#d8c48a", "#d2bd80", "#ddc994"][Math.floor(noise * 3)];
+
+  // Two canvas panels meeting at the ridge — the far one shaded, the near
+  // one lit, so the tent reads as three-dimensional rather than a flat sign.
+  ctx.fillStyle = "#b8a26a";
+  ctx.beginPath();
+  ctx.moveTo(cx, peak);
+  ctx.lineTo(x + size - 3, base);
+  ctx.lineTo(cx, base);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = fabric;
+  ctx.beginPath();
+  ctx.moveTo(cx, peak);
+  ctx.lineTo(x + 3, base);
+  ctx.lineTo(cx, base);
+  ctx.closePath();
+  ctx.fill();
+
+  // The entrance — a dark triangular gap in the near panel.
+  ctx.fillStyle = "rgba(30, 20, 10, 0.75)";
+  ctx.beginPath();
+  ctx.moveTo(cx, peak + 6);
+  ctx.lineTo(cx - 6, base);
+  ctx.lineTo(cx + 3, base);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = "#8a7550";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + 3, base);
+  ctx.lineTo(x - 2, base + 2);
+  ctx.moveTo(x + size - 3, base);
+  ctx.lineTo(x + size + 2, base + 2);
+  ctx.stroke();
+}
+
+function drawCave(x, y, noise) {
+  const size = config.tileSize;
+  groundShadow(x, y, size, 0.36, 0.14, 3);
+
+  const cx = x + size / 2;
+  const baseY = y + size - 2;
+  const stone = ["#5c5650", "#635c54", "#544e49"][Math.floor(noise * 3)];
+
+  ctx.fillStyle = stone;
+  ctx.beginPath();
+  ctx.moveTo(x + 2, baseY);
+  ctx.lineTo(x + 4, y + 6);
+  ctx.lineTo(x + size - 4, y + 8);
+  ctx.lineTo(x + size - 2, baseY);
+  ctx.closePath();
+  ctx.fill();
+
+  // The mouth — black, so whatever's inside stays a mystery for now.
+  ctx.fillStyle = "#0c0a0d";
+  ctx.beginPath();
+  ctx.ellipse(cx, baseY - 10, size * 0.22, size * 0.28, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(cx - size * 0.22, baseY - 10, size * 0.44, 12);
+
+  // A glow from within — an ember, a lantern, something waiting.
+  ctx.fillStyle = `rgba(224, 150, 80, ${0.35 + noise * 0.25})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, baseY - 5, 4, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/** Landmark names float above their structure whenever it's on screen. */
+function drawLandmarkLabels(camera) {
+  const landmarks = terrain?.landmarks;
+  if (!landmarks?.length) return;
+
+  const size = config.tileSize;
+  ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.lineWidth = 3;
+
+  for (const landmark of landmarks) {
+    const x = landmark.tx * size + size / 2 - camera.x;
+    const y = landmark.ty * size - camera.y - size * 0.55;
+    if (x < -60 || x > canvas.width + 60 || y < -20 || y > canvas.height + 20) continue;
+
+    ctx.strokeStyle = "rgba(0,0,0,0.65)";
+    ctx.strokeText(landmark.name, x, y);
+    ctx.fillStyle = "#f2e6c9";
+    ctx.fillText(landmark.name, x, y);
   }
 }
 
