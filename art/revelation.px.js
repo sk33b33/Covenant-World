@@ -22,10 +22,13 @@ ramps("IkHGJ")
 // ---------------------------------------------------------------- ground tiles (32x32)
 sprite("_blade", "d\nd")
 
+sprite("_pebble", "A")
+
 function ashTile(name, base, seed) {
   sprite(name, { w: 32, h: 32 },
     rect(0, 0, 32, 32, base),
-    scatter("_blade", 0, 0, 32, 32, 8, { seed }))
+    scatter("_blade", 0, 0, 32, 32, 12, { seed }),
+    scatter("_pebble", 0, 0, 32, 32, 4, { seed: seed + 50 }))
 }
 ashTile("ground_grass_1", "a", 1)
 ashTile("ground_grass_2", "b", 2)
@@ -55,29 +58,36 @@ sheet("ground", ["ground_grass_1", "ground_grass_2", "ground_grass_3", "ground_f
 // ---------------------------------------------------------------- standing objects
 
 // A gnarled dead tree — the ruin left where the oak would have stood.
-sprite("obj_tree", { w: 32, h: 42, outline: "k" },
-  rect(14, 20, 4, 20, "s"),
-  line(16, 20, 7, 8, "s"),
-  line(16, 14, 25, 4, "s"),
-  line(16, 8, 10, 2, "s"))
+sprite("obj_tree", { w: 34, h: 48, outline: "k" },
+  rect(14, 24, 4, 22, "s"),
+  line(16, 24, 6, 10, "s"), line(16, 16, 26, 4, "s"), line(16, 10, 10, 2, "s"),
+  line(16, 24, 24, 14, "s"),
+  circ(8, 28, 2, "o"), circ(24, 32, 2, "o"))
 
 // Collapsed stonework with a coal-like glow in the cracks.
-sprite("obj_rock", { w: 32, h: 28, outline: "k" },
-  poly([3, 27, 9, 15, 16, 5, 24, 16, 29, 27], "z"),
-  poly([16, 5, 24, 16, 14, 19], "y"),
-  rect(13, 16, 3, 6, "R"), glow("R", { r: 4, strength: 0.6 }),
-  rect(21, 19, 2, 5, "R"), glow("R", { r: 4, strength: 0.6 }))
+sprite("obj_rock", { w: 40, h: 34, outline: "k" },
+  poly([3, 32, 11, 18, 20, 6, 30, 19, 37, 32], "z"),
+  poly([20, 6, 30, 19, 17, 22], "y"),
+  rect(16, 20, 4, 7, "R"), glow("R", { r: 4, strength: 0.6 }),
+  rect(26, 23, 3, 6, "R"), glow("R", { r: 4, strength: 0.6 }),
+  rect(8, 26, 3, 5, "R"), glow("R", { r: 4, strength: 0.6 }))
 
-sprite("obj_tent", { w: 32, h: 34, outline: "k" },
-  poly([16, 3, 30, 31, 16, 31], "D"),
-  poly([16, 3, 2, 31, 16, 31], "C"),
-  poly([16, 10, 10, 31, 18, 31], "E"),
-  line(2, 31, 0, 33, "D"), line(30, 31, 32, 33, "D"))
+sprite("obj_tent", { w: 44, h: 46, outline: "k" },
+  poly([22, 6, 42, 42, 22, 42], "D"),
+  poly([22, 6, 2, 42, 22, 42], "C"),
+  poly([22, 15, 14, 42, 26, 42], "E"),
+  rect(2, 39, 40, 3, "E"),
+  line(22, 1, 22, 7, "E"),
+  poly([22, 0, 22, 5, 29, 3], "D"),
+  line(2, 42, -2, 45, "D"), line(9, 42, 6, 46, "D"),
+  line(42, 42, 46, 45, "D"), line(35, 42, 38, 46, "D"))
 
-sprite("obj_cave", { w: 32, h: 30, outline: "k" },
-  poly([1, 27, 3, 5, 29, 7, 31, 27], "G"),
-  shade([20, 6, 10, 14], 1, 0.6),
-  ellipse(16, 17, 7, 10, "I"), rect(9, 17, 14, 10, "I"),
-  circ(16, 21, 3, "J"), glow("J", { r: 5, strength: 0.6 }))
+sprite("obj_cave", { w: 44, h: 42, outline: "k" },
+  poly([2, 38, 4, 16, 10, 6, 22, 2, 34, 6, 40, 16, 42, 38], "G"),
+  noise(2, 2, 40, 36, "H", 0.1, 4),
+  shade([26, 6, 14, 18], 1, 0.6),
+  ellipse(22, 24, 9, 14, "I"), rect(13, 24, 18, 14, "I"),
+  poly([14, 10, 17, 2, 19, 11], "G"), poly([21, 9, 23, 1, 25, 10], "G"), poly([28, 10, 31, 3, 33, 11], "G"),
+  circ(22, 30, 4, "J"), glow("J", { r: 6, strength: 0.6 }))
 
 sheet("objects", ["obj_tree", "obj_rock", "obj_tent", "obj_cave"], { pad: 1 })

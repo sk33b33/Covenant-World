@@ -117,8 +117,20 @@ const SPRITE_THEME_FOLDERS = {
   shadow: "revelation",
 };
 const CHARACTER_SHEET_FOLDER = "genesis";
+const ANIMAL_SHEET_FOLDER = "animals";
+// Which species wanders a given zone's theme — all drawn from one shared
+// sheet (see art/animals.px.js), same idea as the shared character sheet.
+const THEME_ANIMALS = {
+  light: "sheep",
+  fire: "camel",
+  earth: "dog",
+  spirit: "goat",
+  water: "sheep",
+  shadow: "crow",
+};
 const SPRITE_BUNDLE_PROMISES = new Map();
 let characterSheetPromise = null;
+let animalSheetPromise = null;
 
 function loadImage(src) {
   return new Promise((resolve, reject) => {
@@ -142,14 +154,19 @@ function loadCharacterSheet() {
   return characterSheetPromise;
 }
 
+function loadAnimalSheet() {
+  animalSheetPromise ??= loadSheet(ANIMAL_SHEET_FOLDER, "animals");
+  return animalSheetPromise;
+}
+
 /** Loads (once, cached) the sprite bundle for a theme; awaited before a zone's scene is built. */
 function ensureSpriteBundle(themeKey) {
   const folder = SPRITE_THEME_FOLDERS[themeKey] ?? SPRITE_THEME_FOLDERS.light;
   if (!SPRITE_BUNDLE_PROMISES.has(themeKey)) {
     SPRITE_BUNDLE_PROMISES.set(
       themeKey,
-      Promise.all([loadSheet(folder, "ground"), loadSheet(folder, "objects"), loadCharacterSheet()]).then(
-        ([ground, objects, characters]) => ({ ground, objects, characters }),
+      Promise.all([loadSheet(folder, "ground"), loadSheet(folder, "objects"), loadCharacterSheet(), loadAnimalSheet()]).then(
+        ([ground, objects, characters, animals]) => ({ ground, objects, characters, animals }),
       ),
     );
   }
@@ -165,10 +182,10 @@ function groundFrameName(kind, noise) {
 }
 
 const OBJECT_SPRITES = {
-  tree: { frame: "obj_tree", shadow: 0.62 },
-  rock: { frame: "obj_rock", shadow: 0.6 },
-  tent: { frame: "obj_tent", shadow: 0.66 },
-  cave: { frame: "obj_cave", shadow: 0.66 },
+  tree: { frame: "obj_tree", shadow: 0.85 },
+  rock: { frame: "obj_rock", shadow: 0.85 },
+  tent: { frame: "obj_tent", shadow: 0.95 },
+  cave: { frame: "obj_cave", shadow: 0.95 },
 };
 
 /** Stable per-tile variation, so the same tile always looks the same. */
@@ -250,6 +267,23 @@ function makeShadowMesh(worldDiameter) {
   return mesh;
 }
 
+/** A small seeded PRNG so each zone's animals spawn in the same spots every load. */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hashSeed(...parts) {
+  let h = 0;
+  for (const ch of parts.join("|")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h;
+}
+
 function makeRingMesh(color) {
   const mat = new THREE.MeshBasicMaterial({ map: RING_TEXTURE, color, transparent: true, depthWrite: false });
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(52, 30), mat);
@@ -292,6 +326,7 @@ function buildZoneScene(terrainData, bundle, themeKey) {
   const groundCtx = groundCanvas.getContext("2d");
 
   const waterTiles = [];
+  const walkableTiles = [];
   for (let ty = 0; ty < terrainData.height; ty++) {
     for (let tx = 0; tx < terrainData.width; tx++) {
       const kind = tileAt(tx, ty);
@@ -299,6 +334,7 @@ function buildZoneScene(terrainData, bundle, themeKey) {
       const frame = bundle.ground.frames[groundFrameName(kind, noise)]?.frame;
       if (frame) groundCtx.drawImage(bundle.ground.img, frame.x, frame.y, frame.w, frame.h, tx * size, ty * size, size, size);
       if (kind === "water") waterTiles.push({ tx, ty, x: tx * size, y: ty * size });
+      else if (config.terrain[kind]?.walkable) walkableTiles.push({ tx, ty, x: tx * size, y: ty * size });
     }
   }
 
@@ -361,12 +397,62 @@ function buildZoneScene(terrainData, bundle, themeKey) {
     }
   }
 
+  // Ambient wildlife — decorative only (see art/animals.px.js header): each
+  // one wanders a smooth deterministic loop around a seeded spawn point,
+  // simulated locally per client rather than server-synced.
+  const species = THEME_ANIMALS[themeKey] ?? THEME_ANIMALS.light;
+  const animalFrame = bundle.animals.frames[species]?.frame;
+  const animals = [];
+  if (animalFrame && walkableTiles.length) {
+    const rng = mulberry32(hashSeed(themeKey, String(terrainData.width), String(terrainData.height)));
+    const count = Math.min(walkableTiles.length, 7);
+    for (let i = 0; i < count; i++) {
+      const tile = walkableTiles[Math.floor(rng() * walkableTiles.length)];
+
+      const shadow = makeShadowMesh(size * 0.55);
+      group.add(shadow);
+
+      const sprite = new THREE.Sprite(billboardMaterial(bundle.animals.img, animalFrame, bundle.animals.size));
+      sprite.scale.set(animalFrame.w, animalFrame.h, 1);
+      group.add(sprite);
+
+      animals.push({
+        sprite,
+        shadow,
+        anchorX: tile.x + size / 2,
+        anchorZ: tile.y + size / 2,
+        radiusX: 50 + rng() * 60,
+        radiusZ: 30 + rng() * 40,
+        speed: 0.25 + rng() * 0.2,
+        phase: rng() * Math.PI * 2,
+        w: animalFrame.w,
+        h: animalFrame.h,
+      });
+    }
+  }
+
   scene.add(group);
   scene.background = new THREE.Color(THEME_BACKGROUNDS[themeKey] ?? THEME_BACKGROUNDS.light);
   scene.fog = new THREE.Fog(scene.background.getHex(), 420, 1500);
   sunLight.target.position.set(w / 2, 0, h / 2);
 
-  zoneScene = { group, groundCanvas, groundCtx, groundTexture, groundSheet: bundle.ground, waterTiles, landmarkLabels, width: w, height: h };
+  zoneScene = { group, groundCanvas, groundCtx, groundTexture, groundSheet: bundle.ground, waterTiles, landmarkLabels, animals, width: w, height: h };
+}
+
+/** Animals wander a smooth deterministic loop — no server state, purely cosmetic. */
+function updateAnimals(now) {
+  if (!zoneScene) return;
+  const t = now / 1000;
+  for (const animal of zoneScene.animals) {
+    const ang = t * animal.speed + animal.phase;
+    const x = animal.anchorX + Math.sin(ang) * animal.radiusX;
+    const z = animal.anchorZ + Math.sin(ang * 1.3 + animal.phase) * animal.radiusZ;
+    const facing = Math.cos(ang) < 0 ? -1 : 1;
+
+    animal.sprite.position.set(x, animal.h / 2, z);
+    animal.sprite.scale.set(facing * animal.w, animal.h, 1);
+    animal.shadow.position.set(x, 0.5, z + animal.h * 0.12);
+  }
 }
 
 let lastShimmerUpdate = 0;
@@ -669,8 +755,12 @@ async function characterMaterialsReady() {
   const sheet = await loadCharacterSheet();
   characterMaterials = {};
   for (const dir of ["down", "up", "left", "right"]) {
-    const frame = sheet.frames[`char_${dir}`].frame;
-    characterMaterials[dir] = { material: billboardMaterial(sheet.img, frame, sheet.size), w: frame.w, h: frame.h };
+    characterMaterials[dir] = {};
+    for (const pose of ["idle", "walk1", "walk2"]) {
+      const frameName = pose === "idle" ? `char_${dir}` : `char_${dir}_${pose}`;
+      const frame = sheet.frames[frameName].frame;
+      characterMaterials[dir][pose] = { material: billboardMaterial(sheet.img, frame, sheet.size), w: frame.w, h: frame.h };
+    }
   }
   return characterMaterials;
 }
@@ -678,7 +768,7 @@ await characterMaterialsReady();
 
 function ensureCharacterEntry3D(entry, sessionId) {
   if (entry.sprite3D) return;
-  const base = characterMaterials.down;
+  const base = characterMaterials.down.idle;
 
   const sprite = new THREE.Sprite(base.material);
   sprite.scale.set(base.w, base.h, 1);
@@ -717,15 +807,17 @@ function removeRenderedEntry(sessionId) {
 function updateCharacter3D(entry, sessionId, now) {
   ensureCharacterEntry3D(entry, sessionId);
 
-  // A light bob/squash while walking — the closest analogue to the old
-  // leg-swing now that direction is a single static pose per facing.
+  // A two-frame walk cycle (legs and the opposite arm alternate, baked into
+  // char_*_walk1/walk2 — see art/genesis.px.js) plus a light bob/squash.
   entry.phase = (entry.phase ?? 0) + (entry.moving ? 0.22 : 0);
   if (!entry.moving) entry.phase = 0;
   const bob = entry.moving ? Math.abs(Math.sin(entry.phase)) * 4 : 0;
   const squash = entry.moving ? 1 - Math.abs(Math.sin(entry.phase)) * 0.04 : 1;
 
   const dir = entry.dir ?? "down";
-  const def = characterMaterials[dir] ?? characterMaterials.down;
+  const dirSet = characterMaterials[dir] ?? characterMaterials.down;
+  const pose = !entry.moving ? "idle" : Math.sin(entry.phase) >= 0 ? "walk1" : "walk2";
+  const def = dirSet[pose];
   if (entry.sprite3D.material !== def.material) entry.sprite3D.material = def.material;
   entry.sprite3D.scale.set(def.w * (1 / squash), def.h * squash, 1);
   entry.sprite3D.position.set(entry.x, (def.h * squash) / 2 + bob, entry.y);
@@ -764,6 +856,7 @@ function draw(now) {
   const self = rendered.get(room?.sessionId);
   updateCamera(self);
   updateWaterShimmer(now);
+  updateAnimals(now);
 
   for (const [sessionId, entry] of rendered) updateCharacter3D(entry, sessionId, now);
 

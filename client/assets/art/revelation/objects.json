@@ -4,80 +4,80 @@
    "frame": {
     "x": 0,
     "y": 0,
-    "w": 34,
-    "h": 44
+    "w": 36,
+    "h": 50
    },
    "rotated": false,
    "trimmed": false,
    "spriteSourceSize": {
     "x": 0,
     "y": 0,
-    "w": 34,
-    "h": 44
+    "w": 36,
+    "h": 50
    },
    "sourceSize": {
-    "w": 34,
-    "h": 44
+    "w": 36,
+    "h": 50
    }
   },
   "obj_rock": {
    "frame": {
-    "x": 35,
+    "x": 37,
     "y": 0,
-    "w": 34,
-    "h": 30
+    "w": 42,
+    "h": 36
    },
    "rotated": false,
    "trimmed": false,
    "spriteSourceSize": {
     "x": 0,
     "y": 0,
-    "w": 34,
-    "h": 30
+    "w": 42,
+    "h": 36
    },
    "sourceSize": {
-    "w": 34,
-    "h": 30
+    "w": 42,
+    "h": 36
    }
   },
   "obj_tent": {
    "frame": {
     "x": 0,
-    "y": 45,
-    "w": 34,
-    "h": 36
+    "y": 51,
+    "w": 46,
+    "h": 48
    },
    "rotated": false,
    "trimmed": false,
    "spriteSourceSize": {
     "x": 0,
     "y": 0,
-    "w": 34,
-    "h": 36
+    "w": 46,
+    "h": 48
    },
    "sourceSize": {
-    "w": 34,
-    "h": 36
+    "w": 46,
+    "h": 48
    }
   },
   "obj_cave": {
    "frame": {
-    "x": 35,
-    "y": 45,
-    "w": 34,
-    "h": 32
+    "x": 47,
+    "y": 51,
+    "w": 46,
+    "h": 44
    },
    "rotated": false,
    "trimmed": false,
    "spriteSourceSize": {
     "x": 0,
     "y": 0,
-    "w": 34,
-    "h": 32
+    "w": 46,
+    "h": 44
    },
    "sourceSize": {
-    "w": 34,
-    "h": 32
+    "w": 46,
+    "h": 44
    }
   }
  },
@@ -86,8 +86,8 @@
   "image": "objects.png",
   "format": "RGBA8888",
   "size": {
-   "w": 69,
-   "h": 81
+   "w": 93,
+   "h": 99
   },
   "scale": "1"
  }

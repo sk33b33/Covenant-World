@@ -1,0 +1,114 @@
+{
+ "frames": {
+  "sheep": {
+   "frame": {
+    "x": 0,
+    "y": 0,
+    "w": 38,
+    "h": 28
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 38,
+    "h": 28
+   },
+   "sourceSize": {
+    "w": 38,
+    "h": 28
+   }
+  },
+  "camel": {
+   "frame": {
+    "x": 39,
+    "y": 0,
+    "w": 46,
+    "h": 36
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 46,
+    "h": 36
+   },
+   "sourceSize": {
+    "w": 46,
+    "h": 36
+   }
+  },
+  "goat": {
+   "frame": {
+    "x": 86,
+    "y": 0,
+    "w": 32,
+    "h": 24
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 32,
+    "h": 24
+   },
+   "sourceSize": {
+    "w": 32,
+    "h": 24
+   }
+  },
+  "dog": {
+   "frame": {
+    "x": 0,
+    "y": 37,
+    "w": 28,
+    "h": 20
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 28,
+    "h": 20
+   },
+   "sourceSize": {
+    "w": 28,
+    "h": 20
+   }
+  },
+  "crow": {
+   "frame": {
+    "x": 29,
+    "y": 37,
+    "w": 22,
+    "h": 18
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 22,
+    "h": 18
+   },
+   "sourceSize": {
+    "w": 22,
+    "h": 18
+   }
+  }
+ },
+ "meta": {
+  "app": "pxl",
+  "image": "animals.png",
+  "format": "RGBA8888",
+  "size": {
+   "w": 118,
+   "h": 57
+  },
+  "scale": "1"
+ }
+}

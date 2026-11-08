@@ -13,7 +13,8 @@
     "art:prophets": "pxl build art/prophets.px.js --out client/assets/art/prophets --no-preview",
     "art:gospel": "pxl build art/gospel.px.js --out client/assets/art/gospel --no-preview",
     "art:revelation": "pxl build art/revelation.px.js --out client/assets/art/revelation --no-preview",
-    "art:all": "npm run art:genesis && npm run art:exodus && npm run art:kings && npm run art:prophets && npm run art:gospel && npm run art:revelation"
+    "art:animals": "pxl build art/animals.px.js --out client/assets/art/animals --no-preview",
+    "art:all": "npm run art:genesis && npm run art:exodus && npm run art:kings && npm run art:prophets && npm run art:gospel && npm run art:revelation && npm run art:animals"
   },
   "devDependencies": {
     "pxl-pixelart": "github:crsolver/claude-pxl"

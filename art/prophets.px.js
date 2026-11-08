@@ -21,10 +21,13 @@ ramps("kwvua", "IkHGJ")
 // ---------------------------------------------------------------- ground tiles (32x32)
 sprite("_blade", "d\nd")
 
+sprite("_pebble", "f")
+
 function scrubTile(name, base, seed) {
   sprite(name, { w: 32, h: 32 },
     rect(0, 0, 32, 32, base),
-    scatter("_blade", 0, 0, 32, 32, 10, { seed }))
+    scatter("_blade", 0, 0, 32, 32, 16, { seed }),
+    scatter("_pebble", 0, 0, 32, 32, 4, { seed: seed + 50 }))
 }
 scrubTile("ground_grass_1", "a", 1)
 scrubTile("ground_grass_2", "b", 2)
@@ -55,28 +58,39 @@ sheet("ground", ["ground_grass_1", "ground_grass_2", "ground_grass_3", "ground_f
 // ---------------------------------------------------------------- standing objects
 
 // Same oak the game already uses in every theme that calls for "tree".
-sprite("obj_tree", { w: 32, h: 44, outline: "k" },
-  rect(14, 30, 4, 12, "s"), rect(17, 30, 1, 12, "t"),
-  circ(16, 16, 15, "v"),
-  shade([2, 2, 28, 28], 1, 0.5),
-  circ(10, 10, 6, "u"))
+sprite("obj_tree", { w: 40, h: 54, outline: "k" },
+  poly([15, 52, 13, 40, 27, 40, 25, 52], "s"),
+  rect(18, 38, 4, 14, "s"), rect(21, 38, 1, 14, "t"),
+  circ(20, 20, 18, "v"),
+  circ(12, 15, 10, "w"),
+  circ(29, 17, 9, "w"),
+  noise(3, 3, 34, 30, "w", 0.08, 5),
+  shade([3, 3, 34, 34], 1, 0.45),
+  circ(14, 11, 7, "u"))
 
-// A windswept crag — the one shape unique to this zone.
-sprite("obj_rock", { w: 32, h: 28, outline: "k" },
-  poly([4, 24, 8, 13, 14, 2, 22, 11, 26, 10, 29, 24], "Z"),
-  poly([14, 2, 22, 11, 12, 15], "Q"),
-  rect(8, 0, 16, 3, "Q"))
+// A windswept, multi-peak crag — the one shape unique to this zone.
+sprite("obj_rock", { w: 40, h: 36, outline: "k" },
+  poly([4, 32, 10, 16, 14, 4, 20, 14, 26, 2, 30, 14, 36, 12, 32, 32], "Z"),
+  poly([14, 4, 20, 14, 10, 18], "Q"),
+  poly([26, 2, 30, 14, 20, 16], "Q"),
+  rect(10, 0, 20, 4, "Q"))
 
-sprite("obj_tent", { w: 32, h: 34, outline: "k" },
-  poly([16, 3, 30, 31, 16, 31], "D"),
-  poly([16, 3, 2, 31, 16, 31], "C"),
-  poly([16, 10, 10, 31, 18, 31], "E"),
-  line(2, 31, 0, 33, "D"), line(30, 31, 32, 33, "D"))
+sprite("obj_tent", { w: 44, h: 46, outline: "k" },
+  poly([22, 6, 42, 42, 22, 42], "D"),
+  poly([22, 6, 2, 42, 22, 42], "C"),
+  poly([22, 15, 14, 42, 26, 42], "E"),
+  rect(2, 39, 40, 3, "E"),
+  line(22, 1, 22, 7, "E"),
+  poly([22, 0, 22, 5, 29, 3], "D"),
+  line(2, 42, -2, 45, "D"), line(9, 42, 6, 46, "D"),
+  line(42, 42, 46, 45, "D"), line(35, 42, 38, 46, "D"))
 
-sprite("obj_cave", { w: 32, h: 30, outline: "k" },
-  poly([1, 27, 3, 5, 29, 7, 31, 27], "G"),
-  shade([20, 6, 10, 14], 1, 0.6),
-  ellipse(16, 17, 7, 10, "I"), rect(9, 17, 14, 10, "I"),
-  circ(16, 21, 3, "J"), glow("J", { r: 5, strength: 0.6 }))
+sprite("obj_cave", { w: 44, h: 42, outline: "k" },
+  poly([2, 38, 4, 16, 10, 6, 22, 2, 34, 6, 40, 16, 42, 38], "G"),
+  noise(2, 2, 40, 36, "H", 0.1, 4),
+  shade([26, 6, 14, 18], 1, 0.6),
+  ellipse(22, 24, 9, 14, "I"), rect(13, 24, 18, 14, "I"),
+  poly([14, 10, 17, 2, 19, 11], "G"), poly([21, 9, 23, 1, 25, 10], "G"), poly([28, 10, 31, 3, 33, 11], "G"),
+  circ(22, 30, 4, "J"), glow("J", { r: 6, strength: 0.6 }))
 
 sheet("objects", ["obj_tree", "obj_rock", "obj_tent", "obj_cave"], { pad: 1 })
