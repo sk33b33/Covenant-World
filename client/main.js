@@ -311,6 +311,71 @@ function draw() {
   for (const item of standing) item.draw();
 
   drawLandmarkLabels(camera);
+  drawAtmosphere();
+}
+
+// ---------------------------------------------------------------- atmosphere
+// A few screen-space effects borrowed from the "HD-2D" look (Octopath
+// Traveler and kin): pixel-art sprites staged with cinematic light and
+// depth. The camera itself stays flat top-down — a true tilted 2.5D camera
+// would mean rebuilding movement/collision/rendering from scratch — but a
+// shared raking light, a vignette, and a soft depth blur at the screen's
+// top and bottom edges go a long way toward that mood on top of it.
+
+let fxCanvas = null;
+let fxCtx = null;
+
+function ensureFxCanvas() {
+  if (fxCanvas && fxCanvas.width === canvas.width && fxCanvas.height === canvas.height) return;
+  fxCanvas = document.createElement("canvas");
+  fxCanvas.width = canvas.width;
+  fxCanvas.height = canvas.height;
+  fxCtx = fxCanvas.getContext("2d");
+}
+
+function drawAtmosphere() {
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // Tilt-shift: blur the top and bottom of the frame in a few bands of
+  // increasing strength toward each edge, as if focus is pulled to the
+  // middle distance where the player stands.
+  ensureFxCanvas();
+  fxCtx.clearRect(0, 0, w, h);
+  fxCtx.drawImage(canvas, 0, 0);
+
+  const bands = 3;
+  const bandHeight = Math.round((h * 0.16) / bands);
+  for (let i = 0; i < bands; i++) {
+    const blurPx = (i + 1) * 1.4;
+    const topY = i * bandHeight;
+    const bottomY = h - (i + 1) * bandHeight;
+    ctx.save();
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.drawImage(fxCanvas, 0, topY, w, bandHeight, 0, topY, w, bandHeight);
+    ctx.drawImage(fxCanvas, 0, bottomY, w, bandHeight, 0, bottomY, w, bandHeight);
+    ctx.restore();
+  }
+
+  // One raking light every zone shares — warm from the upper-left, cooling
+  // toward the lower-right — so the whole world reads as lit from one sun
+  // rather than each sprite being its own flat cut-out.
+  const light = ctx.createLinearGradient(0, 0, w, h);
+  light.addColorStop(0, "rgba(255, 214, 160, 0.10)");
+  light.addColorStop(0.5, "rgba(0, 0, 0, 0)");
+  light.addColorStop(1, "rgba(20, 24, 60, 0.12)");
+  ctx.save();
+  ctx.globalCompositeOperation = "overlay";
+  ctx.fillStyle = light;
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+
+  // Vignette, to pull the eye back toward the middle of frame.
+  const vignette = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.max(w, h) * 0.7);
+  vignette.addColorStop(0, "rgba(0,0,0,0)");
+  vignette.addColorStop(1, "rgba(0,0,0,0.38)");
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, w, h);
 }
 
 // One palette + decoration set per chapter energy, matching the zone's theme
@@ -427,13 +492,22 @@ function currentTheme() {
 }
 
 // Per-theme pixel-art sprite sheets (see art/*.px.js, built with `npm run
-// art:genesis`), served from client/assets/art/<folder>/{ground,objects,
-// characters}.{png,json}. Only themes listed here get real sprites; every
-// other theme keeps drawing the hand-coded vector shapes below untouched, so
-// adding a theme's art is purely additive.
-const SPRITE_THEME_FOLDERS = { light: "genesis" };
+// art:all`), served from client/assets/art/<folder>/{ground,objects}.{png,
+// json}. Every zone theme has its own ground + objects art now; the
+// character sheet is shared (the player's own look doesn't change by zone),
+// so it's loaded once from the genesis folder regardless of theme.
+const SPRITE_THEME_FOLDERS = {
+  light: "genesis",
+  fire: "exodus",
+  earth: "kings",
+  spirit: "prophets",
+  water: "gospel",
+  shadow: "revelation",
+};
+const CHARACTER_SHEET_FOLDER = "genesis";
 const SPRITE_BUNDLES = new Map();
 const SPRITE_LOADS_STARTED = new Set();
+let characterSheetPromise = null;
 
 function loadImage(src) {
   return new Promise((resolve, reject) => {
@@ -452,12 +526,17 @@ async function loadSheet(folder, name) {
   return { img, frames: meta.frames };
 }
 
+function loadCharacterSheet() {
+  characterSheetPromise ??= loadSheet(CHARACTER_SHEET_FOLDER, "characters");
+  return characterSheetPromise;
+}
+
 /** Kicks off (once) loading a theme's sprite bundle; cheap to call every frame. */
 function ensureSpriteBundle(themeKey) {
   const folder = SPRITE_THEME_FOLDERS[themeKey];
   if (!folder || SPRITE_LOADS_STARTED.has(themeKey)) return;
   SPRITE_LOADS_STARTED.add(themeKey);
-  Promise.all([loadSheet(folder, "ground"), loadSheet(folder, "objects"), loadSheet(folder, "characters")])
+  Promise.all([loadSheet(folder, "ground"), loadSheet(folder, "objects"), loadCharacterSheet()])
     .then(([ground, objects, characters]) => SPRITE_BUNDLES.set(themeKey, { ground, objects, characters }))
     .catch((err) => console.error(`sprite bundle "${folder}" failed to load`, err));
 }
@@ -478,8 +557,8 @@ function groundFrameName(kind, noise) {
 }
 
 const OBJECT_SPRITES = {
-  tree: { frame: "obj_tree_oak", shadow: [0.34, 0.14, 4] },
-  rock: { frame: "obj_rock_boulder", shadow: [0.3, 0.12, 6] },
+  tree: { frame: "obj_tree", shadow: [0.32, 0.13, 4] },
+  rock: { frame: "obj_rock", shadow: [0.33, 0.125, 5] },
   tent: { frame: "obj_tent", shadow: [0.36, 0.14, 3] },
   cave: { frame: "obj_cave", shadow: [0.36, 0.14, 3] },
 };
@@ -897,10 +976,11 @@ function drawRubble(x, y, noise) {
   ctx.fillRect(x + size / 2 + 6, y + size * 0.65, 2, 5);
 }
 
+/** Cast a little toward the lower-right, away from the scene's shared upper-left light. */
 function groundShadow(x, y, size, rx, ry, offset = 4) {
-  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.fillStyle = "rgba(10,6,4,0.22)";
   ctx.beginPath();
-  ctx.ellipse(x + size / 2, y + size - offset, size * rx, size * ry, 0, 0, Math.PI * 2);
+  ctx.ellipse(x + size / 2 + 2, y + size - offset + 1, size * rx * 1.15, size * ry, 0, 0, Math.PI * 2);
   ctx.fill();
 }
 
@@ -925,9 +1005,9 @@ function drawCharacter(entry, sessionId, camera) {
   const swing = Math.sin(entry.phase) * 3;
   const bob = entry.moving ? Math.abs(Math.sin(entry.phase)) * 1.5 : 0;
 
-  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.fillStyle = "rgba(10,6,4,0.24)";
   ctx.beginPath();
-  ctx.ellipse(x, feet + 2, 9, 3.5, 0, 0, Math.PI * 2);
+  ctx.ellipse(x + 2, feet + 3, 9.5, 3.5, 0, 0, Math.PI * 2);
   ctx.fill();
 
   if (nearby?.sessionId === sessionId) {

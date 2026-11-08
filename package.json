@@ -7,7 +7,13 @@
     "client"
   ],
   "scripts": {
-    "art:genesis": "pxl build art/genesis.px.js --out client/assets/art/genesis --no-preview"
+    "art:genesis": "pxl build art/genesis.px.js --out client/assets/art/genesis --no-preview",
+    "art:exodus": "pxl build art/exodus.px.js --out client/assets/art/exodus --no-preview",
+    "art:kings": "pxl build art/kings.px.js --out client/assets/art/kings --no-preview",
+    "art:prophets": "pxl build art/prophets.px.js --out client/assets/art/prophets --no-preview",
+    "art:gospel": "pxl build art/gospel.px.js --out client/assets/art/gospel --no-preview",
+    "art:revelation": "pxl build art/revelation.px.js --out client/assets/art/revelation --no-preview",
+    "art:all": "npm run art:genesis && npm run art:exodus && npm run art:kings && npm run art:prophets && npm run art:gospel && npm run art:revelation"
   },
   "devDependencies": {
     "pxl-pixelart": "github:crsolver/claude-pxl"

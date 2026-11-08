@@ -1,0 +1,94 @@
+{
+ "frames": {
+  "obj_tree": {
+   "frame": {
+    "x": 0,
+    "y": 0,
+    "w": 34,
+    "h": 44
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 34,
+    "h": 44
+   },
+   "sourceSize": {
+    "w": 34,
+    "h": 44
+   }
+  },
+  "obj_rock": {
+   "frame": {
+    "x": 35,
+    "y": 0,
+    "w": 34,
+    "h": 30
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 34,
+    "h": 30
+   },
+   "sourceSize": {
+    "w": 34,
+    "h": 30
+   }
+  },
+  "obj_tent": {
+   "frame": {
+    "x": 0,
+    "y": 45,
+    "w": 34,
+    "h": 36
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 34,
+    "h": 36
+   },
+   "sourceSize": {
+    "w": 34,
+    "h": 36
+   }
+  },
+  "obj_cave": {
+   "frame": {
+    "x": 35,
+    "y": 45,
+    "w": 34,
+    "h": 32
+   },
+   "rotated": false,
+   "trimmed": false,
+   "spriteSourceSize": {
+    "x": 0,
+    "y": 0,
+    "w": 34,
+    "h": 32
+   },
+   "sourceSize": {
+    "w": 34,
+    "h": 32
+   }
+  }
+ },
+ "meta": {
+  "app": "pxl",
+  "image": "objects.png",
+  "format": "RGBA8888",
+  "size": {
+   "w": 69,
+   "h": 81
+  },
+  "scale": "1"
+ }
+}

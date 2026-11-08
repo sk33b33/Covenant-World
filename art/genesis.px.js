@@ -65,13 +65,13 @@ sheet("ground", ["ground_grass_1", "ground_grass_2", "ground_grass_3", "ground_f
 
 // ---------------------------------------------------------------- standing objects
 
-sprite("obj_tree_oak", { w: 32, h: 44, outline: "k" },
+sprite("obj_tree", { w: 32, h: 44, outline: "k" },
   rect(14, 30, 4, 12, "s"), rect(17, 30, 1, 12, "t"),
   circ(16, 16, 15, "v"),
   shade([2, 2, 28, 28], 1, 0.5),
   circ(10, 10, 6, "u"))
 
-sprite("obj_rock_boulder", { w: 32, h: 26, outline: "k" },
+sprite("obj_rock", { w: 32, h: 26, outline: "k" },
   poly([4, 23, 8, 6, 22, 4, 28, 23], "z"),
   poly([8, 6, 22, 4, 18, 13, 10, 14], "y"),
   shade([16, 10, 14, 13], 1, 0.6))
@@ -88,7 +88,7 @@ sprite("obj_cave", { w: 32, h: 30, outline: "k" },
   ellipse(16, 17, 7, 10, "I"), rect(9, 17, 14, 10, "I"),
   circ(16, 21, 3, "J"), glow("J", { r: 5, strength: 0.6 }))
 
-sheet("objects", ["obj_tree_oak", "obj_rock_boulder", "obj_tent", "obj_cave"], { pad: 1 })
+sheet("objects", ["obj_tree", "obj_rock", "obj_tent", "obj_cave"], { pad: 1 })
 
 // ---------------------------------------------------------------- character
 // Single static pose per facing (no walk cycle yet) — the client applies its
