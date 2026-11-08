@@ -416,8 +416,91 @@ const THEMES = {
   },
 };
 
+function currentThemeKey() {
+  return room.state?.zoneTheme ?? "light";
+}
+
 function currentTheme() {
-  return THEMES[room.state?.zoneTheme] ?? THEMES.light;
+  const key = currentThemeKey();
+  ensureSpriteBundle(key);
+  return THEMES[key] ?? THEMES.light;
+}
+
+// Per-theme pixel-art sprite sheets (see art/*.px.js, built with `npm run
+// art:genesis`), served from client/assets/art/<folder>/{ground,objects,
+// characters}.{png,json}. Only themes listed here get real sprites; every
+// other theme keeps drawing the hand-coded vector shapes below untouched, so
+// adding a theme's art is purely additive.
+const SPRITE_THEME_FOLDERS = { light: "genesis" };
+const SPRITE_BUNDLES = new Map();
+const SPRITE_LOADS_STARTED = new Set();
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`failed to load ${src}`));
+    img.src = src;
+  });
+}
+
+async function loadSheet(folder, name) {
+  const [img, meta] = await Promise.all([
+    loadImage(`/assets/art/${folder}/${name}.png`),
+    fetch(`/assets/art/${folder}/${name}.json`).then((res) => res.json()),
+  ]);
+  return { img, frames: meta.frames };
+}
+
+/** Kicks off (once) loading a theme's sprite bundle; cheap to call every frame. */
+function ensureSpriteBundle(themeKey) {
+  const folder = SPRITE_THEME_FOLDERS[themeKey];
+  if (!folder || SPRITE_LOADS_STARTED.has(themeKey)) return;
+  SPRITE_LOADS_STARTED.add(themeKey);
+  Promise.all([loadSheet(folder, "ground"), loadSheet(folder, "objects"), loadSheet(folder, "characters")])
+    .then(([ground, objects, characters]) => SPRITE_BUNDLES.set(themeKey, { ground, objects, characters }))
+    .catch((err) => console.error(`sprite bundle "${folder}" failed to load`, err));
+}
+
+function drawSheetFrame(sheet, name, dx, dy) {
+  const frame = sheet.frames[name]?.frame;
+  if (!frame) return false;
+  ctx.drawImage(sheet.img, frame.x, frame.y, frame.w, frame.h, dx, dy, frame.w, frame.h);
+  return true;
+}
+
+function groundFrameName(kind, noise) {
+  if (kind === "flowers") return "ground_flowers";
+  if (kind === "path") return "ground_path";
+  if (kind === "sand") return "ground_sand";
+  if (kind === "water") return "ground_water";
+  return `ground_grass_${1 + Math.floor(noise * 3)}`; // also covers tree/rock/tent/cave tiles
+}
+
+const OBJECT_SPRITES = {
+  tree: { frame: "obj_tree_oak", shadow: [0.34, 0.14, 4] },
+  rock: { frame: "obj_rock_boulder", shadow: [0.3, 0.12, 6] },
+  tent: { frame: "obj_tent", shadow: [0.36, 0.14, 3] },
+  cave: { frame: "obj_cave", shadow: [0.36, 0.14, 3] },
+};
+
+function drawObjectSprite(sheet, kind, x, y) {
+  const spec = OBJECT_SPRITES[kind];
+  const frame = spec && sheet.frames[spec.frame]?.frame;
+  if (!frame) return false;
+  const size = config.tileSize;
+  groundShadow(x, y, size, ...spec.shadow);
+  drawSheetFrame(sheet, spec.frame, x, y + size - frame.h);
+  return true;
+}
+
+function drawCharacterSprite(sheet, dir, x, feet, bob) {
+  const frame = sheet.frames[`char_${dir ?? "down"}`]?.frame ?? sheet.frames.char_down?.frame;
+  if (!frame) return false;
+  const dx = Math.round(x - frame.w / 2);
+  const dy = Math.round(feet + 2 - frame.h - bob);
+  ctx.drawImage(sheet.img, frame.x, frame.y, frame.w, frame.h, dx, dy, frame.w, frame.h);
+  return true;
 }
 
 /** Stable per-tile variation, so the same tile always looks the same. */
@@ -447,6 +530,7 @@ function visibleTiles(camera) {
 function drawTerrain(camera, zone) {
   const size = config.tileSize;
   const theme = currentTheme();
+  const bundle = SPRITE_BUNDLES.get(currentThemeKey());
 
   ctx.fillStyle = theme.bg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -460,28 +544,32 @@ function drawTerrain(camera, zone) {
       const noise = tileNoise(tx, ty);
       const x = Math.round(tx * size - camera.x);
       const y = Math.round(ty * size - camera.y);
-      const palette = theme.ground[kind] ?? theme.ground.grass;
+      const drewSprite = bundle && drawSheetFrame(bundle.ground, groundFrameName(kind, noise), x, y);
 
-      ctx.fillStyle = palette[Math.floor(noise * palette.length)];
-      ctx.fillRect(x, y, size, size);
+      if (!drewSprite) {
+        const palette = theme.ground[kind] ?? theme.ground.grass;
+        ctx.fillStyle = palette[Math.floor(noise * palette.length)];
+        ctx.fillRect(x, y, size, size);
+      }
 
       if (kind === "water") {
-        // A couple of drifting highlights, enough to read as moving water.
+        // A couple of drifting highlights, enough to read as moving water —
+        // layered on top either way, since a static sprite can't animate.
         ctx.fillStyle = "rgba(255,255,255,0.13)";
         const wave = Math.sin(shimmer + tx * 0.7 + ty * 0.4) * 3;
         ctx.fillRect(x + 4, y + 10 + wave, size - 12, 2);
         ctx.fillStyle = "rgba(255,255,255,0.07)";
         ctx.fillRect(x + 9, y + 21 - wave, size - 18, 2);
-      } else if (kind === "grass" && noise > 0.86) {
+      } else if (!drewSprite && kind === "grass" && noise > 0.86) {
         ctx.fillStyle = "rgba(255,255,255,0.05)";
         ctx.fillRect(x + 6, y + 18, 5, 3);
         ctx.fillRect(x + 18, y + 9, 5, 3);
-      } else if (kind === "flowers") {
+      } else if (!drewSprite && kind === "flowers") {
         const colours = theme.flowerColors;
         ctx.fillStyle = colours[Math.floor(noise * colours.length)];
         ctx.fillRect(x + 8 + noise * 6, y + 10 + noise * 8, 4, 4);
         ctx.fillRect(x + 19, y + 20, 3, 3);
-      } else if (kind === "path" && noise > 0.8) {
+      } else if (!drewSprite && kind === "path" && noise > 0.8) {
         ctx.fillStyle = "rgba(0,0,0,0.06)";
         ctx.fillRect(x + 7, y + 13, 6, 4);
       }
@@ -497,6 +585,7 @@ function drawTerrain(camera, zone) {
 function collectTallTerrain(camera, into) {
   const size = config.tileSize;
   const theme = currentTheme();
+  const bundle = SPRITE_BUNDLES.get(currentThemeKey());
   const { fromX, toX, fromY, toY } = visibleTiles(camera);
 
   for (let ty = fromY; ty <= toY; ty++) {
@@ -509,6 +598,7 @@ function collectTallTerrain(camera, into) {
       into.push({
         y: ty * size + size,
         draw: () => {
+          if (bundle && drawObjectSprite(bundle.objects, kind, x, y)) return;
           if (kind === "tree") return drawTree(x, y, noise, theme.tree);
           if (kind === "rock") return drawRock(x, y, noise, theme.rock);
           if (kind === "tent") return drawTent(x, y, noise);
@@ -848,41 +938,46 @@ function drawCharacter(entry, sessionId, camera) {
     ctx.stroke();
   }
 
-  const top = feet - 26 - bob;
+  const bundle = SPRITE_BUNDLES.get(currentThemeKey());
+  const drewSprite = bundle && drawCharacterSprite(bundle.characters, entry.dir, x, feet, bob);
 
-  ctx.fillStyle = "#2f3a4a";
-  ctx.fillRect(x - 5, feet - 9 + swing * 0.3, 4, 9 - swing * 0.3);
-  ctx.fillRect(x + 1, feet - 9 - swing * 0.3, 4, 9 + swing * 0.3);
+  if (!drewSprite) {
+    const top = feet - 26 - bob;
 
-  ctx.fillStyle = shirtColour(entry.name);
-  roundedRect(x - 7, top + 10, 14, 13, 3);
-  ctx.fill();
+    ctx.fillStyle = "#2f3a4a";
+    ctx.fillRect(x - 5, feet - 9 + swing * 0.3, 4, 9 - swing * 0.3);
+    ctx.fillRect(x + 1, feet - 9 - swing * 0.3, 4, 9 + swing * 0.3);
 
-  // Arms read as depth cues when facing sideways.
-  ctx.fillStyle = "#e8b48c";
-  if (entry.dir === "left") ctx.fillRect(x - 9, top + 12 + swing, 3, 8);
-  else if (entry.dir === "right") ctx.fillRect(x + 6, top + 12 - swing, 3, 8);
-  else {
-    ctx.fillRect(x - 9, top + 12 + swing, 3, 8);
-    ctx.fillRect(x + 6, top + 12 - swing, 3, 8);
-  }
+    ctx.fillStyle = shirtColour(entry.name);
+    roundedRect(x - 7, top + 10, 14, 13, 3);
+    ctx.fill();
 
-  ctx.fillStyle = "#e8b48c";
-  ctx.beginPath();
-  ctx.arc(x, top + 4, 7.5, 0, Math.PI * 2);
-  ctx.fill();
+    // Arms read as depth cues when facing sideways.
+    ctx.fillStyle = "#e8b48c";
+    if (entry.dir === "left") ctx.fillRect(x - 9, top + 12 + swing, 3, 8);
+    else if (entry.dir === "right") ctx.fillRect(x + 6, top + 12 - swing, 3, 8);
+    else {
+      ctx.fillRect(x - 9, top + 12 + swing, 3, 8);
+      ctx.fillRect(x + 6, top + 12 - swing, 3, 8);
+    }
 
-  // Hair covers the whole head from behind and leaves a face otherwise.
-  ctx.fillStyle = isSelf ? "#4a3520" : "#2f2a26";
-  ctx.beginPath();
-  if (entry.dir === "up") ctx.arc(x, top + 4, 7.5, 0, Math.PI * 2);
-  else ctx.arc(x, top + 2.5, 7.5, Math.PI, Math.PI * 2);
-  ctx.fill();
+    ctx.fillStyle = "#e8b48c";
+    ctx.beginPath();
+    ctx.arc(x, top + 4, 7.5, 0, Math.PI * 2);
+    ctx.fill();
 
-  if (entry.dir !== "up") {
-    ctx.fillStyle = "#2b2b33";
-    const eyes = entry.dir === "left" ? [-4] : entry.dir === "right" ? [3] : [-3, 2];
-    for (const offset of eyes) ctx.fillRect(x + offset, top + 5, 2, 2);
+    // Hair covers the whole head from behind and leaves a face otherwise.
+    ctx.fillStyle = isSelf ? "#4a3520" : "#2f2a26";
+    ctx.beginPath();
+    if (entry.dir === "up") ctx.arc(x, top + 4, 7.5, 0, Math.PI * 2);
+    else ctx.arc(x, top + 2.5, 7.5, Math.PI, Math.PI * 2);
+    ctx.fill();
+
+    if (entry.dir !== "up") {
+      ctx.fillStyle = "#2b2b33";
+      const eyes = entry.dir === "left" ? [-4] : entry.dir === "right" ? [3] : [-3, 2];
+      for (const offset of eyes) ctx.fillRect(x + offset, top + 5, 2, 2);
+    }
   }
 
   if (entry.inBattle) {

@@ -5,5 +5,11 @@
   "workspaces": [
     "server",
     "client"
-  ]
+  ],
+  "scripts": {
+    "art:genesis": "pxl build art/genesis.px.js --out client/assets/art/genesis --no-preview"
+  },
+  "devDependencies": {
+    "pxl-pixelart": "github:crsolver/claude-pxl"
+  }
 }
