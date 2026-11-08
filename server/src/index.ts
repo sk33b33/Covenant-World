@@ -12,10 +12,17 @@ import { ZoneRoom } from "./rooms/ZoneRoom.js";
 const clientDir = path.resolve(fileURLToPath(new URL("../../client", import.meta.url)));
 // The SDK's prebuilt browser bundle, served as-is so the test client needs no build step.
 const sdkDist = path.join(path.dirname(fileURLToPath(import.meta.resolve("@colyseus/sdk/package.json"))), "dist");
+// Same idea for three.js — its own package layout (build/three.module.js +
+// examples/jsm/* addons) is served as-is; client/index.html's import map
+// points "three" and "three/addons/" at it, same as three.js's own
+// documented no-bundler setup. three's package.json doesn't export its own
+// path, so the root is derived from its main entry (build/three.module.js).
+const threeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.resolve("three"))));
 
 const app = express();
 app.use(express.static(clientDir));
 app.use("/vendor", express.static(sdkDist));
+app.use("/vendor/three", express.static(threeRoot));
 app.get("/config.json", (_req, res) => {
   res.json({
     tileSize: TILE_SIZE,

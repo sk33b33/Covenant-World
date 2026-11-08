@@ -73,6 +73,32 @@
       #overlay strong { font-size: 18px; }
       #overlay .keys { color: var(--muted); }
       [hidden] { display: none !important; }
+      /* Name tags and landmark labels are plain DOM, positioned each frame
+         from the 3D scene's camera projection — crisper than a texture, and
+         it keeps the WebGL canvas itself free of 2D text draws. */
+      #labels {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      .label {
+        position: absolute;
+        transform: translate(-50%, -100%);
+        font: 600 11px ui-sans-serif, system-ui, sans-serif;
+        white-space: nowrap;
+        text-shadow: 0 0 3px rgba(0, 0, 0, 0.9), 0 0 3px rgba(0, 0, 0, 0.9);
+        color: #fff;
+      }
+      .label.self { color: #ffe08a; }
+      .label.landmark { color: #f2e6c9; bottom: auto; }
+      /* A soft frame around the scene — cheaper and crisper than a shader pass. */
+      #vignette {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0) 45%, rgba(0, 0, 0, 0.4) 100%);
+      }
     </style>
   </head>
   <body>
@@ -84,6 +110,8 @@
     </div>
     <div id="stage-wrap">
       <canvas id="stage" width="800" height="600"></canvas>
+      <div id="labels"></div>
+      <div id="vignette"></div>
       <div id="prompt" hidden></div>
       <div id="overlay" hidden></div>
     </div>
@@ -93,6 +121,14 @@
       another player. Add <code>?name=Ash</code> to pick a name.
     </footer>
     <script src="/vendor/colyseus.js"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/vendor/three/build/three.module.js",
+          "three/addons/": "/vendor/three/examples/jsm/"
+        }
+      }
+    </script>
     <script type="module" src="/main.js"></script>
   </body>
 </html>

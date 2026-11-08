@@ -1,33 +1,23 @@
+import * as THREE from "three";
+
 const canvas = document.getElementById("stage");
-const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 const populationEl = document.getElementById("population");
 const roomEl = document.getElementById("room");
 const promptEl = document.getElementById("prompt");
 const overlayEl = document.getElementById("overlay");
+const labelsEl = document.getElementById("labels");
 
-const KEY_BINDINGS = {
-  ArrowUp: "up", KeyW: "up",
-  ArrowDown: "down", KeyS: "down",
-  ArrowLeft: "left", KeyA: "left",
-  ArrowRight: "right", KeyD: "right",
-};
-
-const held = { up: false, down: false, left: false, right: false };
-const pressedAt = {};
-const releasedAt = {};
-let lastSent = null;
-
-/**
- * A key is reported as held for at least this long. The server samples held
- * direction on its own 20Hz tick, so a tap shorter than one tick would land
- * and clear between samples and be lost entirely — and tapping to turn on the
- * spot is exactly what the turn delay exists for.
- */
-const MIN_HOLD_MS = 90;
+// The HTML-declared size is the game's logical viewport — captured before
+// three.js's renderer touches the canvas's width/height attributes (it sets
+// those to the *physical* framebuffer size, scaled by devicePixelRatio).
+const VIEW_W = canvas.width;
+const VIEW_H = canvas.height;
 
 // Server positions jump one tick at a time (20Hz); these catch up to them every
 // animation frame so movement reads as smooth at whatever the display refreshes.
+// Each entry also carries its own 3D sprite, shadow, ring and name-tag label —
+// see ensureCharacterEntry3D / removeRenderedEntry.
 const rendered = new Map();
 
 // "roaming" → "awaiting" (challenge sent) | "challenged" (challenge received) → "battling".
@@ -49,6 +39,386 @@ let battleRoom = null;
 let traveling = false;
 let terrain = null;
 
+// Walking speed in pixels/second, derived from how long the server takes to
+// cross one tile — so the slide finishes exactly as the step does. World
+// units in the 3D scene are the same pixel units used here (1 unit = 1px,
+// one tile = config.tileSize units), so this feeds straight into 3D position.
+const WALK_SPEED = config.tileSize / (config.stepDurationMs / 1000);
+const tileToPixel = (tile) => (tile + 0.5) * config.tileSize;
+
+// ======================================================================
+// 3D scene — a true tilted "HD-2D" camera: pixel-art sprites staged over
+// a real lit 3D ground plane, rather than screen-space tricks on a flat
+// top-down canvas. The networking/movement code above and below is
+// untouched — world positions are still plain (x, y) pixels on the
+// server's tile grid; here they just become (x, z) in three.js's Y-up
+// space, with Y itself used only for camera height and billboard anchoring.
+// This whole section has to sit above connectToZone (even though it reads
+// like a late-file "setup"), because connectToZone calls into it — building
+// the ground mesh and sprite bundle — the moment the module starts running.
+// ======================================================================
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(VIEW_W, VIEW_H);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#11151c");
+
+const camera = new THREE.PerspectiveCamera(27, VIEW_W / VIEW_H, 10, 6000);
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.68);
+scene.add(ambientLight);
+
+// The one shared "sun" every zone is lit by — low and raking, the same
+// direction the old screen-space light wash faked. Sprites (trees, rocks,
+// characters) stay unlit billboards; only the ground plane responds to it.
+const sunLight = new THREE.DirectionalLight(0xffdfb0, 1.0);
+sunLight.position.set(-260, 420, -200);
+scene.add(sunLight);
+scene.add(sunLight.target);
+
+// Camera sits at a fixed angle/offset behind-above the player and simply
+// translates to follow — it never rotates with facing, matching the fixed,
+// dioramic camera these HD-2D games use.
+const CAMERA_OFFSET = new THREE.Vector3(0, 460, 360);
+const cameraTarget = new THREE.Vector3();
+
+function updateCamera(selfEntry) {
+  const focusX = selfEntry ? selfEntry.x : 0;
+  const focusZ = selfEntry ? selfEntry.y : 0;
+  cameraTarget.set(focusX, 0, focusZ);
+  camera.position.set(focusX + CAMERA_OFFSET.x, CAMERA_OFFSET.y, focusZ + CAMERA_OFFSET.z);
+  camera.lookAt(cameraTarget);
+}
+
+const THEME_BACKGROUNDS = {
+  light: "#16240f",
+  fire: "#2a1c0d",
+  earth: "#221d16",
+  spirit: "#1c1f22",
+  water: "#0f2420",
+  shadow: "#180a12",
+};
+
+// ---------------------------------------------------------------- sprite sheets
+// Per-theme pixel-art sprite sheets (see art/*.px.js, built with `npm run
+// art:all`), served from client/assets/art/<folder>/{ground,objects}.{png,
+// json}. The character sheet is shared (the player's own look doesn't
+// change by zone), so it's loaded once from the genesis folder regardless
+// of theme.
+const SPRITE_THEME_FOLDERS = {
+  light: "genesis",
+  fire: "exodus",
+  earth: "kings",
+  spirit: "prophets",
+  water: "gospel",
+  shadow: "revelation",
+};
+const CHARACTER_SHEET_FOLDER = "genesis";
+const SPRITE_BUNDLE_PROMISES = new Map();
+let characterSheetPromise = null;
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`failed to load ${src}`));
+    img.src = src;
+  });
+}
+
+async function loadSheet(folder, name) {
+  const [img, meta] = await Promise.all([
+    loadImage(`/assets/art/${folder}/${name}.png`),
+    fetch(`/assets/art/${folder}/${name}.json`).then((res) => res.json()),
+  ]);
+  return { img, frames: meta.frames, size: meta.meta.size };
+}
+
+function loadCharacterSheet() {
+  characterSheetPromise ??= loadSheet(CHARACTER_SHEET_FOLDER, "characters");
+  return characterSheetPromise;
+}
+
+/** Loads (once, cached) the sprite bundle for a theme; awaited before a zone's scene is built. */
+function ensureSpriteBundle(themeKey) {
+  const folder = SPRITE_THEME_FOLDERS[themeKey] ?? SPRITE_THEME_FOLDERS.light;
+  if (!SPRITE_BUNDLE_PROMISES.has(themeKey)) {
+    SPRITE_BUNDLE_PROMISES.set(
+      themeKey,
+      Promise.all([loadSheet(folder, "ground"), loadSheet(folder, "objects"), loadCharacterSheet()]).then(
+        ([ground, objects, characters]) => ({ ground, objects, characters }),
+      ),
+    );
+  }
+  return SPRITE_BUNDLE_PROMISES.get(themeKey);
+}
+
+function groundFrameName(kind, noise) {
+  if (kind === "flowers") return "ground_flowers";
+  if (kind === "path") return "ground_path";
+  if (kind === "sand") return "ground_sand";
+  if (kind === "water") return "ground_water";
+  return `ground_grass_${1 + Math.floor(noise * 3)}`; // also covers tree/rock/tent/cave tiles
+}
+
+const OBJECT_SPRITES = {
+  tree: { frame: "obj_tree", shadow: 0.62 },
+  rock: { frame: "obj_rock", shadow: 0.6 },
+  tent: { frame: "obj_tent", shadow: 0.66 },
+  cave: { frame: "obj_cave", shadow: 0.66 },
+};
+
+/** Stable per-tile variation, so the same tile always looks the same. */
+function tileNoise(tx, ty) {
+  const value = Math.sin(tx * 127.1 + ty * 311.7) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function tileAt(tx, ty) {
+  if (!terrain) return "grass";
+  const char = terrain.rows[ty]?.[tx];
+  if (!char) return "grass";
+  for (const [kind, spec] of Object.entries(config.terrain)) if (spec.char === char) return kind;
+  return "grass";
+}
+
+/** Crops a texture atlas down to one frame, keeping pixel-art edges crisp. */
+function frameTexture(img, frame, sheetSize) {
+  const texture = new THREE.Texture(img);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.generateMipmaps = false;
+  texture.offset.set(frame.x / sheetSize.w, 1 - (frame.y + frame.h) / sheetSize.h);
+  texture.repeat.set(frame.w / sheetSize.w, frame.h / sheetSize.h);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function billboardMaterial(img, frame, sheetSize) {
+  return new THREE.SpriteMaterial({ map: frameTexture(img, frame, sheetSize), alphaTest: 0.5 });
+}
+
+// A soft round smudge, reused (tinted and scaled) for every ground-contact
+// shadow and the green/red adjacency rings — cheaper than per-shape canvas
+// draws, and now it's real geometry a 3D light doesn't have to fake.
+function buildRadialTexture(inner, outer) {
+  const size = 64;
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(size / 2, size / 2, size * inner, size / 2, size / 2, size * outer);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+  const texture = new THREE.CanvasTexture(c);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+const SHADOW_TEXTURE = buildRadialTexture(0, 0.4);
+const RING_TEXTURE = (() => {
+  const size = 64;
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const g = c.getContext("2d");
+  g.strokeStyle = "rgba(255,255,255,1)";
+  g.lineWidth = 4;
+  g.beginPath();
+  g.ellipse(size / 2, size / 2, size * 0.38, size * 0.38, 0, 0, Math.PI * 2);
+  g.stroke();
+  return new THREE.CanvasTexture(c);
+})();
+
+function makeShadowMesh(worldDiameter) {
+  const mat = new THREE.MeshBasicMaterial({
+    map: SHADOW_TEXTURE,
+    color: 0x0a0604,
+    transparent: true,
+    opacity: 0.4,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(worldDiameter, worldDiameter * 0.6), mat);
+  mesh.rotation.x = -Math.PI / 2;
+  return mesh;
+}
+
+function makeRingMesh(color) {
+  const mat = new THREE.MeshBasicMaterial({ map: RING_TEXTURE, color, transparent: true, depthWrite: false });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(52, 30), mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.visible = false;
+  return mesh;
+}
+
+// ---------------------------------------------------------------- zone scene
+// Terrain is static once generated, so the whole zone's ground is composited
+// to one offscreen canvas ONCE (used as a single textured plane) and every
+// standing object becomes a sprite built once too — nothing here is rebuilt
+// per frame, unlike the old immediate-mode 2D canvas draw.
+
+let zoneScene = null;
+
+function clearZoneScene() {
+  if (!zoneScene) return;
+  scene.remove(zoneScene.group);
+  zoneScene.group.traverse((obj) => {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material?.map) obj.material.map.dispose();
+    if (obj.material) obj.material.dispose();
+  });
+  zoneScene.groundTexture.dispose();
+  for (const el of zoneScene.landmarkLabels) el.remove();
+  zoneScene = null;
+}
+
+function buildZoneScene(terrainData, bundle, themeKey) {
+  clearZoneScene();
+
+  const size = config.tileSize;
+  const w = terrainData.width * size;
+  const h = terrainData.height * size;
+
+  const groundCanvas = document.createElement("canvas");
+  groundCanvas.width = w;
+  groundCanvas.height = h;
+  const groundCtx = groundCanvas.getContext("2d");
+
+  const waterTiles = [];
+  for (let ty = 0; ty < terrainData.height; ty++) {
+    for (let tx = 0; tx < terrainData.width; tx++) {
+      const kind = tileAt(tx, ty);
+      const noise = tileNoise(tx, ty);
+      const frame = bundle.ground.frames[groundFrameName(kind, noise)]?.frame;
+      if (frame) groundCtx.drawImage(bundle.ground.img, frame.x, frame.y, frame.w, frame.h, tx * size, ty * size, size, size);
+      if (kind === "water") waterTiles.push({ tx, ty, x: tx * size, y: ty * size });
+    }
+  }
+
+  const groundTexture = new THREE.CanvasTexture(groundCanvas);
+  groundTexture.colorSpace = THREE.SRGBColorSpace;
+  groundTexture.magFilter = THREE.NearestFilter;
+  groundTexture.minFilter = THREE.LinearMipmapLinearFilter;
+  groundTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+
+  const group = new THREE.Group();
+
+  const groundGeo = new THREE.PlaneGeometry(w, h);
+  groundGeo.rotateX(-Math.PI / 2);
+  groundGeo.translate(w / 2, 0, h / 2);
+  const groundMat = new THREE.MeshLambertMaterial({ map: groundTexture });
+  group.add(new THREE.Mesh(groundGeo, groundMat));
+
+  // A thin perimeter line, echoing the old zone-boundary stroke.
+  const borderPoints = [
+    new THREE.Vector3(0, 1, 0),
+    new THREE.Vector3(w, 1, 0),
+    new THREE.Vector3(w, 1, h),
+    new THREE.Vector3(0, 1, h),
+    new THREE.Vector3(0, 1, 0),
+  ];
+  const border = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(borderPoints),
+    new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }),
+  );
+  group.add(border);
+
+  const landmarkLabels = [];
+  for (const landmark of terrainData.landmarks ?? []) {
+    const el = document.createElement("div");
+    el.className = "label landmark";
+    el.textContent = landmark.name;
+    labelsEl.appendChild(el);
+    landmarkLabels.push(Object.assign(el, { worldX: tileToPixel(landmark.tx), worldZ: landmark.ty * size + size * 0.2 }));
+  }
+
+  for (let ty = 0; ty < terrainData.height; ty++) {
+    for (let tx = 0; tx < terrainData.width; tx++) {
+      const kind = tileAt(tx, ty);
+      const spec = OBJECT_SPRITES[kind];
+      if (!spec) continue;
+      const frame = bundle.objects.frames[spec.frame]?.frame;
+      if (!frame) continue;
+
+      const worldX = tileToPixel(tx);
+      const worldZ = tileToPixel(ty);
+
+      const shadow = makeShadowMesh(size * spec.shadow);
+      shadow.position.set(worldX, 0.5, worldZ + size * 0.18);
+      group.add(shadow);
+
+      const sprite = new THREE.Sprite(billboardMaterial(bundle.objects.img, frame, bundle.objects.size));
+      sprite.scale.set(frame.w, frame.h, 1);
+      sprite.position.set(worldX, frame.h / 2, worldZ);
+      group.add(sprite);
+    }
+  }
+
+  scene.add(group);
+  scene.background = new THREE.Color(THEME_BACKGROUNDS[themeKey] ?? THEME_BACKGROUNDS.light);
+  scene.fog = new THREE.Fog(scene.background.getHex(), 420, 1500);
+  sunLight.target.position.set(w / 2, 0, h / 2);
+
+  zoneScene = { group, groundCanvas, groundCtx, groundTexture, groundSheet: bundle.ground, waterTiles, landmarkLabels, width: w, height: h };
+}
+
+let lastShimmerUpdate = 0;
+
+/** Water is the only ground tile that moves — redrawn at a modest rate, not every frame. */
+function updateWaterShimmer(now) {
+  if (!zoneScene || !zoneScene.waterTiles.length) return;
+  if (now - lastShimmerUpdate < 120) return;
+  lastShimmerUpdate = now;
+
+  const size = config.tileSize;
+  const groundSheet = zoneScene.groundSheet;
+  const shimmer = now / 700;
+  const { groundCtx: gctx } = zoneScene;
+  const frame = groundSheet.frames["ground_water"]?.frame;
+  if (!frame) return;
+
+  for (const tile of zoneScene.waterTiles) {
+    gctx.drawImage(groundSheet.img, frame.x, frame.y, frame.w, frame.h, tile.x, tile.y, size, size);
+    const wave = Math.sin(shimmer + tile.tx * 0.7 + tile.ty * 0.4) * 3;
+    gctx.fillStyle = "rgba(255,255,255,0.13)";
+    gctx.fillRect(tile.x + 4, tile.y + 10 + wave, size - 12, 2);
+    gctx.fillStyle = "rgba(255,255,255,0.07)";
+    gctx.fillRect(tile.x + 9, tile.y + 21 - wave, size - 18, 2);
+  }
+  zoneScene.groundTexture.needsUpdate = true;
+}
+
+// ======================================================================
+// Networking / input / game state — unchanged from the old renderer.
+// ======================================================================
+
+const KEY_BINDINGS = {
+  ArrowUp: "up", KeyW: "up",
+  ArrowDown: "down", KeyS: "down",
+  ArrowLeft: "left", KeyA: "left",
+  ArrowRight: "right", KeyD: "right",
+};
+
+const held = { up: false, down: false, left: false, right: false };
+const pressedAt = {};
+const releasedAt = {};
+let lastSent = null;
+
+/**
+ * A key is reported as held for at least this long. The server samples held
+ * direction on its own 20Hz tick, so a tap shorter than one tick would land
+ * and clear between samples and be lost entirely — and tapping to turn on the
+ * spot is exactly what the turn delay exists for.
+ */
+const MIN_HOLD_MS = 90;
+
 /**
  * Joins a zone, or moves to another one. The matchmaker picks which *instance*
  * of that zone we land in, so this is also what happens when an instance fills
@@ -67,11 +437,19 @@ async function connectToZone(zoneId, entry) {
   }
 
   // Nobody from the old zone exists here.
-  rendered.clear();
+  for (const sessionId of [...rendered.keys()]) removeRenderedEntry(sessionId);
   nearby = null;
   backToRoaming("");
 
-  terrain = await fetch(`/zones/${zoneId ?? config.startingZone}/terrain.json`).then((res) => res.json());
+  const resolvedZoneId = zoneId ?? config.startingZone;
+  const themeKey = config.zones.find((z) => z.id === resolvedZoneId)?.theme ?? "light";
+
+  const [terrainData, bundle] = await Promise.all([
+    fetch(`/zones/${resolvedZoneId}/terrain.json`).then((res) => res.json()),
+    ensureSpriteBundle(themeKey),
+  ]);
+  terrain = terrainData;
+  buildZoneScene(terrain, bundle, themeKey);
 
   try {
     room = await colyseus.joinOrCreate("zone", { name, zoneId, entry });
@@ -214,16 +592,11 @@ function frame(now) {
 
   sendInputIfChanged();
   interpolate(delta);
-  draw();
+  draw(now);
   drawOverlays(now);
 
   requestAnimationFrame(frame);
 }
-
-// Walking speed in pixels/second, derived from how long the server takes to
-// cross one tile — so the slide finishes exactly as the step does.
-const WALK_SPEED = config.tileSize / (config.stepDurationMs / 1000);
-const tileToPixel = (tile) => (tile + 0.5) * config.tileSize;
 
 function interpolate(delta) {
   // The first state patch lands shortly after join, so the first few frames
@@ -275,8 +648,8 @@ function interpolate(delta) {
     }
   });
 
-  for (const sessionId of rendered.keys()) {
-    if (!present.has(sessionId)) rendered.delete(sessionId);
+  for (const sessionId of [...rendered.keys()]) {
+    if (!present.has(sessionId)) removeRenderedEntry(sessionId);
   }
 
   nearby = closest;
@@ -286,805 +659,122 @@ function interpolate(delta) {
   roomEl.textContent = `${room.state.zoneName} — ${room.state.zoneSubtitle} · instance ${room.roomId}`;
 }
 
-function draw() {
-  const self = rendered.get(room.sessionId);
-  // Instances of different zones are different sizes, so bounds come from
-  // state — in tiles, which only the client turns into pixels.
-  const zone = {
-    width: (room.state?.width || 0) * config.tileSize || canvas.width,
-    height: (room.state?.height || 0) * config.tileSize || canvas.height,
-  };
-  const camera = {
-    x: clamp((self?.x ?? zone.width / 2) - canvas.width / 2, 0, Math.max(0, zone.width - canvas.width)),
-    y: clamp((self?.y ?? zone.height / 2) - canvas.height / 2, 0, Math.max(0, zone.height - canvas.height)),
-  };
+// ---------------------------------------------------------------- characters
+// Direction materials are built once (shared across every player, including
+// zone switches) since the character sheet never changes by theme.
+let characterMaterials = null;
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawTerrain(camera, zone);
-
-  // Trees, rocks and players are drawn together in depth order, so you pass
-  // behind a tree rather than through it.
-  const standing = [];
-  for (const [sessionId, entry] of rendered) standing.push({ y: entry.y, draw: () => drawCharacter(entry, sessionId, camera) });
-  collectTallTerrain(camera, standing);
-  standing.sort((a, b) => a.y - b.y);
-  for (const item of standing) item.draw();
-
-  drawLandmarkLabels(camera);
-  drawAtmosphere();
-}
-
-// ---------------------------------------------------------------- atmosphere
-// A few screen-space effects borrowed from the "HD-2D" look (Octopath
-// Traveler and kin): pixel-art sprites staged with cinematic light and
-// depth. The camera itself stays flat top-down — a true tilted 2.5D camera
-// would mean rebuilding movement/collision/rendering from scratch — but a
-// shared raking light, a vignette, and a soft depth blur at the screen's
-// top and bottom edges go a long way toward that mood on top of it.
-
-let fxCanvas = null;
-let fxCtx = null;
-
-function ensureFxCanvas() {
-  if (fxCanvas && fxCanvas.width === canvas.width && fxCanvas.height === canvas.height) return;
-  fxCanvas = document.createElement("canvas");
-  fxCanvas.width = canvas.width;
-  fxCanvas.height = canvas.height;
-  fxCtx = fxCanvas.getContext("2d");
-}
-
-function drawAtmosphere() {
-  const w = canvas.width;
-  const h = canvas.height;
-
-  // Tilt-shift: blur the top and bottom of the frame in a few bands of
-  // increasing strength toward each edge, as if focus is pulled to the
-  // middle distance where the player stands.
-  ensureFxCanvas();
-  fxCtx.clearRect(0, 0, w, h);
-  fxCtx.drawImage(canvas, 0, 0);
-
-  const bands = 3;
-  const bandHeight = Math.round((h * 0.16) / bands);
-  for (let i = 0; i < bands; i++) {
-    const blurPx = (i + 1) * 1.4;
-    const topY = i * bandHeight;
-    const bottomY = h - (i + 1) * bandHeight;
-    ctx.save();
-    ctx.filter = `blur(${blurPx}px)`;
-    ctx.drawImage(fxCanvas, 0, topY, w, bandHeight, 0, topY, w, bandHeight);
-    ctx.drawImage(fxCanvas, 0, bottomY, w, bandHeight, 0, bottomY, w, bandHeight);
-    ctx.restore();
+async function characterMaterialsReady() {
+  if (characterMaterials) return characterMaterials;
+  const sheet = await loadCharacterSheet();
+  characterMaterials = {};
+  for (const dir of ["down", "up", "left", "right"]) {
+    const frame = sheet.frames[`char_${dir}`].frame;
+    characterMaterials[dir] = { material: billboardMaterial(sheet.img, frame, sheet.size), w: frame.w, h: frame.h };
   }
+  return characterMaterials;
+}
+await characterMaterialsReady();
 
-  // One raking light every zone shares — warm from the upper-left, cooling
-  // toward the lower-right — so the whole world reads as lit from one sun
-  // rather than each sprite being its own flat cut-out.
-  const light = ctx.createLinearGradient(0, 0, w, h);
-  light.addColorStop(0, "rgba(255, 214, 160, 0.10)");
-  light.addColorStop(0.5, "rgba(0, 0, 0, 0)");
-  light.addColorStop(1, "rgba(20, 24, 60, 0.12)");
-  ctx.save();
-  ctx.globalCompositeOperation = "overlay";
-  ctx.fillStyle = light;
-  ctx.fillRect(0, 0, w, h);
-  ctx.restore();
+function ensureCharacterEntry3D(entry, sessionId) {
+  if (entry.sprite3D) return;
+  const base = characterMaterials.down;
 
-  // Vignette, to pull the eye back toward the middle of frame.
-  const vignette = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.max(w, h) * 0.7);
-  vignette.addColorStop(0, "rgba(0,0,0,0)");
-  vignette.addColorStop(1, "rgba(0,0,0,0.38)");
-  ctx.fillStyle = vignette;
-  ctx.fillRect(0, 0, w, h);
+  const sprite = new THREE.Sprite(base.material);
+  sprite.scale.set(base.w, base.h, 1);
+  scene.add(sprite);
+
+  const shadow = makeShadowMesh(24);
+  scene.add(shadow);
+
+  const nearRing = makeRingMesh(0x8ee88e);
+  const battleRing = makeRingMesh(0xe06c75);
+  scene.add(nearRing, battleRing);
+
+  const label = document.createElement("div");
+  label.className = "label" + (sessionId === room.sessionId ? " self" : "");
+  labelsEl.appendChild(label);
+
+  entry.sprite3D = sprite;
+  entry.shadow3D = shadow;
+  entry.nearRing3D = nearRing;
+  entry.battleRing3D = battleRing;
+  entry.label = label;
 }
 
-// One palette + decoration set per chapter energy, matching the zone's theme
-// (server-assigned per zone, see server/src/zones.ts). Shades within a kind
-// sit close together on purpose: enough variation that a field isn't a flat
-// slab, not so much that it reads as a checkerboard.
-const THEMES = {
-  // Genesis — Eden: bright, lush, untroubled.
-  light: {
-    bg: "#16240f",
-    ground: {
-      grass: ["#5a8f49", "#5c9250", "#57894a", "#619752"],
-      flowers: ["#5a8f49"],
-      path: ["#c9ad78", "#c4a670", "#cdb280"],
-      sand: ["#e3d3a0", "#e0cf9c"],
-      water: ["#3f8fd0", "#4192cf"],
-      tree: ["#54874a"],
-      rock: ["#5a8f49"],
-    },
-    flowerColors: ["#f0dd6e", "#ea88ac", "#e8e8f2"],
-    tree: "oak",
-    rock: "boulder",
-  },
-  // Exodus — the wilderness: sand to the horizon, one oasis.
-  fire: {
-    bg: "#2a1c0d",
-    ground: {
-      grass: ["#8a7a44"],
-      flowers: ["#8a7a44"],
-      path: ["#c79a5a", "#c29556"],
-      sand: ["#e2b877", "#dcae6c", "#e6c084"],
-      water: ["#2f8f95", "#31989e"],
-      tree: ["#caa25f"],
-      rock: ["#caa25f"],
-    },
-    flowerColors: ["#f0dd6e"],
-    tree: "palm",
-    rock: "boulder",
-  },
-  // Kings — the royal city: streets and stone.
-  earth: {
-    bg: "#221d16",
-    ground: {
-      grass: ["#7c9457"],
-      flowers: ["#7c9457"],
-      path: ["#a89a83", "#a2937c", "#ad9f88"],
-      sand: ["#c9b899"],
-      water: ["#3f74a8"],
-      tree: ["#a89a83"],
-      rock: ["#a89a83"],
-    },
-    flowerColors: ["#e8d26a"],
-    tree: "oak",
-    rock: "building",
-  },
-  // Prophets — the highlands: dry, windswept, rocky.
-  spirit: {
-    bg: "#1c1f22",
-    ground: {
-      grass: ["#6c7a63", "#6f7d66", "#697760"],
-      flowers: ["#6c7a63"],
-      path: ["#9c9a92", "#96948c"],
-      sand: ["#b7b2a2"],
-      water: ["#4f7d8a"],
-      tree: ["#63705f"],
-      rock: ["#63705f"],
-    },
-    flowerColors: ["#e8e8f2", "#c9b6e0"],
-    tree: "oak",
-    rock: "crag",
-  },
-  // Gospel — Galilee: fresh green shores around a great lake.
-  water: {
-    bg: "#0f2420",
-    ground: {
-      grass: ["#4e8a5e", "#50905f", "#4b8459"],
-      flowers: ["#4e8a5e"],
-      path: ["#b3a077"],
-      sand: ["#d6c69a"],
-      water: ["#2f7fa0", "#2f86a8", "#337f9c"],
-      tree: ["#487d55"],
-      rock: ["#487d55"],
-    },
-    flowerColors: ["#e8e8f2", "#f0dd6e"],
-    tree: "oak",
-    rock: "boulder",
-  },
-  // Revelation — the new creation: scorched, dark, unquiet.
-  shadow: {
-    bg: "#180a12",
-    ground: {
-      grass: ["#3c3540", "#3f3742", "#39323d"],
-      flowers: ["#3c3540"],
-      path: ["#332a34", "#362d37"],
-      sand: ["#4a3f47"],
-      water: ["#1c1224", "#20142a"],
-      tree: ["#332a34"],
-      rock: ["#332a34"],
-    },
-    flowerColors: ["#c96b6b"],
-    tree: "dead",
-    rock: "rubble",
-  },
-};
-
-function currentThemeKey() {
-  return room.state?.zoneTheme ?? "light";
-}
-
-function currentTheme() {
-  const key = currentThemeKey();
-  ensureSpriteBundle(key);
-  return THEMES[key] ?? THEMES.light;
-}
-
-// Per-theme pixel-art sprite sheets (see art/*.px.js, built with `npm run
-// art:all`), served from client/assets/art/<folder>/{ground,objects}.{png,
-// json}. Every zone theme has its own ground + objects art now; the
-// character sheet is shared (the player's own look doesn't change by zone),
-// so it's loaded once from the genesis folder regardless of theme.
-const SPRITE_THEME_FOLDERS = {
-  light: "genesis",
-  fire: "exodus",
-  earth: "kings",
-  spirit: "prophets",
-  water: "gospel",
-  shadow: "revelation",
-};
-const CHARACTER_SHEET_FOLDER = "genesis";
-const SPRITE_BUNDLES = new Map();
-const SPRITE_LOADS_STARTED = new Set();
-let characterSheetPromise = null;
-
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(`failed to load ${src}`));
-    img.src = src;
-  });
-}
-
-async function loadSheet(folder, name) {
-  const [img, meta] = await Promise.all([
-    loadImage(`/assets/art/${folder}/${name}.png`),
-    fetch(`/assets/art/${folder}/${name}.json`).then((res) => res.json()),
-  ]);
-  return { img, frames: meta.frames };
-}
-
-function loadCharacterSheet() {
-  characterSheetPromise ??= loadSheet(CHARACTER_SHEET_FOLDER, "characters");
-  return characterSheetPromise;
-}
-
-/** Kicks off (once) loading a theme's sprite bundle; cheap to call every frame. */
-function ensureSpriteBundle(themeKey) {
-  const folder = SPRITE_THEME_FOLDERS[themeKey];
-  if (!folder || SPRITE_LOADS_STARTED.has(themeKey)) return;
-  SPRITE_LOADS_STARTED.add(themeKey);
-  Promise.all([loadSheet(folder, "ground"), loadSheet(folder, "objects"), loadCharacterSheet()])
-    .then(([ground, objects, characters]) => SPRITE_BUNDLES.set(themeKey, { ground, objects, characters }))
-    .catch((err) => console.error(`sprite bundle "${folder}" failed to load`, err));
-}
-
-function drawSheetFrame(sheet, name, dx, dy) {
-  const frame = sheet.frames[name]?.frame;
-  if (!frame) return false;
-  ctx.drawImage(sheet.img, frame.x, frame.y, frame.w, frame.h, dx, dy, frame.w, frame.h);
-  return true;
-}
-
-function groundFrameName(kind, noise) {
-  if (kind === "flowers") return "ground_flowers";
-  if (kind === "path") return "ground_path";
-  if (kind === "sand") return "ground_sand";
-  if (kind === "water") return "ground_water";
-  return `ground_grass_${1 + Math.floor(noise * 3)}`; // also covers tree/rock/tent/cave tiles
-}
-
-const OBJECT_SPRITES = {
-  tree: { frame: "obj_tree", shadow: [0.32, 0.13, 4] },
-  rock: { frame: "obj_rock", shadow: [0.33, 0.125, 5] },
-  tent: { frame: "obj_tent", shadow: [0.36, 0.14, 3] },
-  cave: { frame: "obj_cave", shadow: [0.36, 0.14, 3] },
-};
-
-function drawObjectSprite(sheet, kind, x, y) {
-  const spec = OBJECT_SPRITES[kind];
-  const frame = spec && sheet.frames[spec.frame]?.frame;
-  if (!frame) return false;
-  const size = config.tileSize;
-  groundShadow(x, y, size, ...spec.shadow);
-  drawSheetFrame(sheet, spec.frame, x, y + size - frame.h);
-  return true;
-}
-
-function drawCharacterSprite(sheet, dir, x, feet, bob) {
-  const frame = sheet.frames[`char_${dir ?? "down"}`]?.frame ?? sheet.frames.char_down?.frame;
-  if (!frame) return false;
-  const dx = Math.round(x - frame.w / 2);
-  const dy = Math.round(feet + 2 - frame.h - bob);
-  ctx.drawImage(sheet.img, frame.x, frame.y, frame.w, frame.h, dx, dy, frame.w, frame.h);
-  return true;
-}
-
-/** Stable per-tile variation, so the same tile always looks the same. */
-function tileNoise(tx, ty) {
-  const value = Math.sin(tx * 127.1 + ty * 311.7) * 43758.5453;
-  return value - Math.floor(value);
-}
-
-function tileAt(tx, ty) {
-  if (!terrain) return "grass";
-  const char = terrain.rows[ty]?.[tx];
-  if (!char) return "grass";
-  for (const [kind, spec] of Object.entries(config.terrain)) if (spec.char === char) return kind;
-  return "grass";
-}
-
-function visibleTiles(camera) {
-  const size = config.tileSize;
-  return {
-    fromX: Math.max(0, Math.floor(camera.x / size)),
-    toX: Math.min((terrain?.width ?? 0) - 1, Math.ceil((camera.x + canvas.width) / size)),
-    fromY: Math.max(0, Math.floor(camera.y / size)),
-    toY: Math.min((terrain?.height ?? 0) - 1, Math.ceil((camera.y + canvas.height) / size)),
-  };
-}
-
-function drawTerrain(camera, zone) {
-  const size = config.tileSize;
-  const theme = currentTheme();
-  const bundle = SPRITE_BUNDLES.get(currentThemeKey());
-
-  ctx.fillStyle = theme.bg;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  const { fromX, toX, fromY, toY } = visibleTiles(camera);
-  const shimmer = performance.now() / 700;
-
-  for (let ty = fromY; ty <= toY; ty++) {
-    for (let tx = fromX; tx <= toX; tx++) {
-      const kind = tileAt(tx, ty);
-      const noise = tileNoise(tx, ty);
-      const x = Math.round(tx * size - camera.x);
-      const y = Math.round(ty * size - camera.y);
-      const drewSprite = bundle && drawSheetFrame(bundle.ground, groundFrameName(kind, noise), x, y);
-
-      if (!drewSprite) {
-        const palette = theme.ground[kind] ?? theme.ground.grass;
-        ctx.fillStyle = palette[Math.floor(noise * palette.length)];
-        ctx.fillRect(x, y, size, size);
-      }
-
-      if (kind === "water") {
-        // A couple of drifting highlights, enough to read as moving water —
-        // layered on top either way, since a static sprite can't animate.
-        ctx.fillStyle = "rgba(255,255,255,0.13)";
-        const wave = Math.sin(shimmer + tx * 0.7 + ty * 0.4) * 3;
-        ctx.fillRect(x + 4, y + 10 + wave, size - 12, 2);
-        ctx.fillStyle = "rgba(255,255,255,0.07)";
-        ctx.fillRect(x + 9, y + 21 - wave, size - 18, 2);
-      } else if (!drewSprite && kind === "grass" && noise > 0.86) {
-        ctx.fillStyle = "rgba(255,255,255,0.05)";
-        ctx.fillRect(x + 6, y + 18, 5, 3);
-        ctx.fillRect(x + 18, y + 9, 5, 3);
-      } else if (!drewSprite && kind === "flowers") {
-        const colours = theme.flowerColors;
-        ctx.fillStyle = colours[Math.floor(noise * colours.length)];
-        ctx.fillRect(x + 8 + noise * 6, y + 10 + noise * 8, 4, 4);
-        ctx.fillRect(x + 19, y + 20, 3, 3);
-      } else if (!drewSprite && kind === "path" && noise > 0.8) {
-        ctx.fillStyle = "rgba(0,0,0,0.06)";
-        ctx.fillRect(x + 7, y + 13, 6, 4);
-      }
-    }
+function removeRenderedEntry(sessionId) {
+  const entry = rendered.get(sessionId);
+  if (!entry) return;
+  for (const obj of [entry.sprite3D, entry.shadow3D, entry.nearRing3D, entry.battleRing3D]) {
+    if (!obj) continue;
+    scene.remove(obj);
+    obj.material?.dispose();
   }
-
-  ctx.strokeStyle = "rgba(0,0,0,0.35)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(-camera.x, -camera.y, zone.width, zone.height);
+  entry.label?.remove();
+  rendered.delete(sessionId);
 }
 
-/** Trees and rocks stand up out of their tile, so they sort with the players. */
-function collectTallTerrain(camera, into) {
-  const size = config.tileSize;
-  const theme = currentTheme();
-  const bundle = SPRITE_BUNDLES.get(currentThemeKey());
-  const { fromX, toX, fromY, toY } = visibleTiles(camera);
+function updateCharacter3D(entry, sessionId, now) {
+  ensureCharacterEntry3D(entry, sessionId);
 
-  for (let ty = fromY; ty <= toY; ty++) {
-    for (let tx = fromX; tx <= toX; tx++) {
-      const kind = tileAt(tx, ty);
-      if (kind !== "tree" && kind !== "rock" && kind !== "tent" && kind !== "cave") continue;
-      const x = tx * size - camera.x;
-      const y = ty * size - camera.y;
-      const noise = tileNoise(tx, ty);
-      into.push({
-        y: ty * size + size,
-        draw: () => {
-          if (bundle && drawObjectSprite(bundle.objects, kind, x, y)) return;
-          if (kind === "tree") return drawTree(x, y, noise, theme.tree);
-          if (kind === "rock") return drawRock(x, y, noise, theme.rock);
-          if (kind === "tent") return drawTent(x, y, noise);
-          return drawCave(x, y, noise);
-        },
-      });
-    }
-  }
-}
-
-/**
- * A named structure — not enterable, no shop exists behind it yet, but
- * placed and labelled now so the world already reads as inhabited. See
- * server/src/terrain.ts placeLandmark and docs/ARCHITECTURE.md.
- */
-function drawTent(x, y, noise) {
-  const size = config.tileSize;
-  groundShadow(x, y, size, 0.36, 0.14, 3);
-
-  const cx = x + size / 2;
-  const base = y + size - 3;
-  const peak = y + 5;
-  const fabric = ["#d8c48a", "#d2bd80", "#ddc994"][Math.floor(noise * 3)];
-
-  // Two canvas panels meeting at the ridge — the far one shaded, the near
-  // one lit, so the tent reads as three-dimensional rather than a flat sign.
-  ctx.fillStyle = "#b8a26a";
-  ctx.beginPath();
-  ctx.moveTo(cx, peak);
-  ctx.lineTo(x + size - 3, base);
-  ctx.lineTo(cx, base);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = fabric;
-  ctx.beginPath();
-  ctx.moveTo(cx, peak);
-  ctx.lineTo(x + 3, base);
-  ctx.lineTo(cx, base);
-  ctx.closePath();
-  ctx.fill();
-
-  // The entrance — a dark triangular gap in the near panel.
-  ctx.fillStyle = "rgba(30, 20, 10, 0.75)";
-  ctx.beginPath();
-  ctx.moveTo(cx, peak + 6);
-  ctx.lineTo(cx - 6, base);
-  ctx.lineTo(cx + 3, base);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.strokeStyle = "#8a7550";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x + 3, base);
-  ctx.lineTo(x - 2, base + 2);
-  ctx.moveTo(x + size - 3, base);
-  ctx.lineTo(x + size + 2, base + 2);
-  ctx.stroke();
-}
-
-function drawCave(x, y, noise) {
-  const size = config.tileSize;
-  groundShadow(x, y, size, 0.36, 0.14, 3);
-
-  const cx = x + size / 2;
-  const baseY = y + size - 2;
-  const stone = ["#5c5650", "#635c54", "#544e49"][Math.floor(noise * 3)];
-
-  ctx.fillStyle = stone;
-  ctx.beginPath();
-  ctx.moveTo(x + 2, baseY);
-  ctx.lineTo(x + 4, y + 6);
-  ctx.lineTo(x + size - 4, y + 8);
-  ctx.lineTo(x + size - 2, baseY);
-  ctx.closePath();
-  ctx.fill();
-
-  // The mouth — black, so whatever's inside stays a mystery for now.
-  ctx.fillStyle = "#0c0a0d";
-  ctx.beginPath();
-  ctx.ellipse(cx, baseY - 10, size * 0.22, size * 0.28, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillRect(cx - size * 0.22, baseY - 10, size * 0.44, 12);
-
-  // A glow from within — an ember, a lantern, something waiting.
-  ctx.fillStyle = `rgba(224, 150, 80, ${0.35 + noise * 0.25})`;
-  ctx.beginPath();
-  ctx.ellipse(cx, baseY - 5, 4, 3, 0, 0, Math.PI * 2);
-  ctx.fill();
-}
-
-/** Landmark names float above their structure whenever it's on screen. */
-function drawLandmarkLabels(camera) {
-  const landmarks = terrain?.landmarks;
-  if (!landmarks?.length) return;
-
-  const size = config.tileSize;
-  ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.lineWidth = 3;
-
-  for (const landmark of landmarks) {
-    const x = landmark.tx * size + size / 2 - camera.x;
-    const y = landmark.ty * size - camera.y - size * 0.55;
-    if (x < -60 || x > canvas.width + 60 || y < -20 || y > canvas.height + 20) continue;
-
-    ctx.strokeStyle = "rgba(0,0,0,0.65)";
-    ctx.strokeText(landmark.name, x, y);
-    ctx.fillStyle = "#f2e6c9";
-    ctx.fillText(landmark.name, x, y);
-  }
-}
-
-function drawTree(x, y, noise, style) {
-  if (style === "palm") return drawPalm(x, y, noise);
-  if (style === "dead") return drawDeadTree(x, y, noise);
-  drawOak(x, y, noise);
-}
-
-function drawOak(x, y, noise) {
-  const size = config.tileSize;
-  groundShadow(x, y, size, 0.34, 0.14);
-
-  ctx.fillStyle = "#6b4a2f";
-  ctx.fillRect(x + size / 2 - 3, y + size - 14, 6, 12);
-
-  const canopy = ["#2f5c2a", "#356630", "#2b5526"][Math.floor(noise * 3)];
-  ctx.fillStyle = canopy;
-  ctx.beginPath();
-  ctx.arc(x + size / 2, y + size / 2 - 8, size * 0.46, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "rgba(255,255,255,0.08)";
-  ctx.beginPath();
-  ctx.arc(x + size / 2 - 5, y + size / 2 - 13, size * 0.2, 0, Math.PI * 2);
-  ctx.fill();
-}
-
-function drawPalm(x, y, noise) {
-  const size = config.tileSize;
-  const cx = x + size / 2;
-  const top = y + size / 2 - 12;
-  groundShadow(x, y, size, 0.3, 0.12);
-
-  // A gently curved trunk, leaning with the wind rather than dead straight.
-  const lean = (noise - 0.5) * 6;
-  ctx.strokeStyle = "#8a6a3c";
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(cx, y + size - 2);
-  ctx.quadraticCurveTo(cx + lean, y + size / 2, cx + lean * 1.4, top);
-  ctx.stroke();
-
-  const frondColour = "#3f8a4a";
-  for (const angle of [-70, -35, 0, 35, 70]) {
-    const rad = (angle * Math.PI) / 180;
-    ctx.strokeStyle = frondColour;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(cx + lean * 1.4, top);
-    ctx.quadraticCurveTo(
-      cx + lean * 1.4 + Math.sin(rad) * 14,
-      top - 6,
-      cx + lean * 1.4 + Math.sin(rad) * 20,
-      top + Math.cos(rad) * 4,
-    );
-    ctx.stroke();
-  }
-}
-
-function drawDeadTree(x, y, noise) {
-  const size = config.tileSize;
-  const cx = x + size / 2;
-  groundShadow(x, y, size, 0.28, 0.11);
-
-  ctx.strokeStyle = "#241f26";
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(cx, y + size - 2);
-  ctx.lineTo(cx, y + size / 2 - 6);
-  ctx.stroke();
-
-  ctx.lineWidth = 2.5;
-  for (const [dx, dy, ex, ey] of [
-    [0, -4, -9, -14],
-    [0, -10, 8, -18],
-    [0, -16, -6 * (noise > 0.5 ? 1 : -1), -22],
-  ]) {
-    ctx.beginPath();
-    ctx.moveTo(cx + dx, y + size / 2 + dy);
-    ctx.lineTo(cx + ex, y + size / 2 + ey);
-    ctx.stroke();
-  }
-}
-
-function drawRock(x, y, noise, style) {
-  if (style === "building") return drawBuilding(x, y, noise);
-  if (style === "crag") return drawCrag(x, y, noise);
-  if (style === "rubble") return drawRubble(x, y, noise);
-  drawBoulder(x, y);
-}
-
-function drawBoulder(x, y) {
-  const size = config.tileSize;
-  groundShadow(x, y, size, 0.3, 0.12, 6);
-
-  ctx.fillStyle = "#7d8285";
-  ctx.beginPath();
-  ctx.moveTo(x + 5, y + size - 6);
-  ctx.lineTo(x + 11, y + 10);
-  ctx.lineTo(x + 22, y + 8);
-  ctx.lineTo(x + size - 4, y + size - 6);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "rgba(255,255,255,0.14)";
-  ctx.beginPath();
-  ctx.moveTo(x + 11, y + 10);
-  ctx.lineTo(x + 22, y + 8);
-  ctx.lineTo(x + 18, y + 17);
-  ctx.closePath();
-  ctx.fill();
-}
-
-function drawBuilding(x, y, noise) {
-  const size = config.tileSize;
-  groundShadow(x, y, size, 0.36, 0.13, 4);
-
-  const wall = ["#d9c9a6", "#cdbd9a", "#c3b28f"][Math.floor(noise * 3)];
-  const roof = ["#8a4a3a", "#7a4034", "#96543f"][Math.floor((1 - noise) * 3)];
-
-  ctx.fillStyle = wall;
-  ctx.fillRect(x + 4, y + size / 2 - 4, size - 8, size / 2);
-
-  ctx.fillStyle = roof;
-  ctx.beginPath();
-  ctx.moveTo(x + 2, y + size / 2 - 4);
-  ctx.lineTo(x + size / 2, y + 4);
-  ctx.lineTo(x + size - 2, y + size / 2 - 4);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = "#5c4632";
-  ctx.fillRect(x + size / 2 - 3, y + size - 12, 6, 10);
-  ctx.fillStyle = "rgba(255, 224, 138, 0.55)";
-  ctx.fillRect(x + 8, y + size / 2 + 2, 4, 4);
-  ctx.fillRect(x + size - 12, y + size / 2 + 2, 4, 4);
-}
-
-function drawCrag(x, y, noise) {
-  const size = config.tileSize;
-  groundShadow(x, y, size, 0.32, 0.12, 6);
-
-  ctx.fillStyle = "#565a68";
-  ctx.beginPath();
-  ctx.moveTo(x + 4, y + size - 4);
-  ctx.lineTo(x + 8, y + size * 0.45);
-  ctx.lineTo(x + size / 2 - 2, y + 2);
-  ctx.lineTo(x + size / 2 + 6, y + size * 0.4);
-  ctx.lineTo(x + size - 6, y + size * 0.35);
-  ctx.lineTo(x + size - 3, y + size - 4);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = "rgba(255,255,255,0.1)";
-  ctx.beginPath();
-  ctx.moveTo(x + size / 2 - 2, y + 2);
-  ctx.lineTo(x + size / 2 + 6, y + size * 0.4);
-  ctx.lineTo(x + size / 2 - 4, y + size * 0.5);
-  ctx.closePath();
-  ctx.fill();
-
-  if (noise > 0.5) {
-    // A wisp of low cloud snagged on the peak — this is the windswept zone.
-    ctx.fillStyle = "rgba(255,255,255,0.12)";
-    ctx.fillRect(x + size / 2 - 8, y - 2, 16, 3);
-  }
-}
-
-function drawRubble(x, y, noise) {
-  const size = config.tileSize;
-  groundShadow(x, y, size, 0.34, 0.13, 6);
-
-  ctx.fillStyle = "#2b2530";
-  ctx.beginPath();
-  ctx.moveTo(x + 3, y + size - 4);
-  ctx.lineTo(x + 9, y + size * 0.5);
-  ctx.lineTo(x + size / 2, y + size * 0.2);
-  ctx.lineTo(x + size - 8, y + size * 0.55);
-  ctx.lineTo(x + size - 3, y + size - 4);
-  ctx.closePath();
-  ctx.fill();
-
-  // A coal-like glow in the cracks — this is ruin, not just stone.
-  ctx.fillStyle = `rgba(224, 90, 70, ${0.25 + noise * 0.25})`;
-  ctx.fillRect(x + size / 2 - 2, y + size * 0.55, 3, 6);
-  ctx.fillRect(x + size / 2 + 6, y + size * 0.65, 2, 5);
-}
-
-/** Cast a little toward the lower-right, away from the scene's shared upper-left light. */
-function groundShadow(x, y, size, rx, ry, offset = 4) {
-  ctx.fillStyle = "rgba(10,6,4,0.22)";
-  ctx.beginPath();
-  ctx.ellipse(x + size / 2 + 2, y + size - offset + 1, size * rx * 1.15, size * ry, 0, 0, Math.PI * 2);
-  ctx.fill();
-}
-
-const SHIRTS = ["#c0553f", "#3f74c0", "#4aa05e", "#9a5bb5", "#c9873f", "#3fa2a8"];
-
-function shirtColour(name) {
-  let hash = 0;
-  for (let i = 0; i < (name ?? "").length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
-  return SHIRTS[hash % SHIRTS.length];
-}
-
-function drawCharacter(entry, sessionId, camera) {
-  const isSelf = sessionId === room.sessionId;
-  const size = config.tileSize;
-  const x = Math.round(entry.x - camera.x);
-  const feet = Math.round(entry.y - camera.y) + size / 2 - 4;
-
-  // Walk cycle: legs alternate and the body bobs, driven by distance covered
-  // rather than time, so it stays in step with the tile the server puts us on.
+  // A light bob/squash while walking — the closest analogue to the old
+  // leg-swing now that direction is a single static pose per facing.
   entry.phase = (entry.phase ?? 0) + (entry.moving ? 0.22 : 0);
   if (!entry.moving) entry.phase = 0;
-  const swing = Math.sin(entry.phase) * 3;
-  const bob = entry.moving ? Math.abs(Math.sin(entry.phase)) * 1.5 : 0;
+  const bob = entry.moving ? Math.abs(Math.sin(entry.phase)) * 4 : 0;
+  const squash = entry.moving ? 1 - Math.abs(Math.sin(entry.phase)) * 0.04 : 1;
 
-  ctx.fillStyle = "rgba(10,6,4,0.24)";
-  ctx.beginPath();
-  ctx.ellipse(x + 2, feet + 3, 9.5, 3.5, 0, 0, Math.PI * 2);
-  ctx.fill();
+  const dir = entry.dir ?? "down";
+  const def = characterMaterials[dir] ?? characterMaterials.down;
+  if (entry.sprite3D.material !== def.material) entry.sprite3D.material = def.material;
+  entry.sprite3D.scale.set(def.w * (1 / squash), def.h * squash, 1);
+  entry.sprite3D.position.set(entry.x, (def.h * squash) / 2 + bob, entry.y);
 
-  if (nearby?.sessionId === sessionId) {
-    ctx.strokeStyle = "#8ee88e";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.ellipse(x, feet + 2, 13, 6, 0, 0, Math.PI * 2);
-    ctx.stroke();
-  }
+  entry.shadow3D.position.set(entry.x, 0.5, entry.y + 6);
 
-  const bundle = SPRITE_BUNDLES.get(currentThemeKey());
-  const drewSprite = bundle && drawCharacterSprite(bundle.characters, entry.dir, x, feet, bob);
+  const isNearby = nearby?.sessionId === sessionId;
+  entry.nearRing3D.visible = isNearby && !entry.inBattle;
+  if (isNearby) entry.nearRing3D.position.set(entry.x, 0.6, entry.y + 4);
 
-  if (!drewSprite) {
-    const top = feet - 26 - bob;
+  entry.battleRing3D.visible = !!entry.inBattle;
+  if (entry.inBattle) entry.battleRing3D.position.set(entry.x, 0.6, entry.y + 4);
 
-    ctx.fillStyle = "#2f3a4a";
-    ctx.fillRect(x - 5, feet - 9 + swing * 0.3, 4, 9 - swing * 0.3);
-    ctx.fillRect(x + 1, feet - 9 - swing * 0.3, 4, 9 + swing * 0.3);
-
-    ctx.fillStyle = shirtColour(entry.name);
-    roundedRect(x - 7, top + 10, 14, 13, 3);
-    ctx.fill();
-
-    // Arms read as depth cues when facing sideways.
-    ctx.fillStyle = "#e8b48c";
-    if (entry.dir === "left") ctx.fillRect(x - 9, top + 12 + swing, 3, 8);
-    else if (entry.dir === "right") ctx.fillRect(x + 6, top + 12 - swing, 3, 8);
-    else {
-      ctx.fillRect(x - 9, top + 12 + swing, 3, 8);
-      ctx.fillRect(x + 6, top + 12 - swing, 3, 8);
-    }
-
-    ctx.fillStyle = "#e8b48c";
-    ctx.beginPath();
-    ctx.arc(x, top + 4, 7.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Hair covers the whole head from behind and leaves a face otherwise.
-    ctx.fillStyle = isSelf ? "#4a3520" : "#2f2a26";
-    ctx.beginPath();
-    if (entry.dir === "up") ctx.arc(x, top + 4, 7.5, 0, Math.PI * 2);
-    else ctx.arc(x, top + 2.5, 7.5, Math.PI, Math.PI * 2);
-    ctx.fill();
-
-    if (entry.dir !== "up") {
-      ctx.fillStyle = "#2b2b33";
-      const eyes = entry.dir === "left" ? [-4] : entry.dir === "right" ? [3] : [-3, 2];
-      for (const offset of eyes) ctx.fillRect(x + offset, top + 5, 2, 2);
-    }
-  }
-
-  if (entry.inBattle) {
-    ctx.strokeStyle = "#e06c75";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.ellipse(x, feet + 2, 13, 6, 0, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = "rgba(0,0,0,0.65)";
-  ctx.strokeText(entry.name ?? "", x, top - 8);
-  ctx.fillStyle = isSelf ? "#ffe08a" : "#ffffff";
-  ctx.fillText(entry.name ?? "", x, top - 8);
+  const screen = worldToScreen(entry.x, def.h * squash + bob + 14, entry.y);
+  entry.label.style.left = `${screen.x}px`;
+  entry.label.style.top = `${screen.y}px`;
+  entry.label.style.display = screen.behind ? "none" : "block";
+  if (entry.label.textContent !== entry.name) entry.label.textContent = entry.name ?? "";
 }
 
-function roundedRect(x, y, width, height, radius) {
-  ctx.beginPath();
-  ctx.moveTo(x + radius, y);
-  ctx.arcTo(x + width, y, x + width, y + height, radius);
-  ctx.arcTo(x + width, y + height, x, y + height, radius);
-  ctx.arcTo(x, y + height, x, y, radius);
-  ctx.arcTo(x, y, x + width, y, radius);
-  ctx.closePath();
+// ---------------------------------------------------------------- draw
+const projected = new THREE.Vector3();
+
+function worldToScreen(x, y, z) {
+  projected.set(x, y, z).project(camera);
+  return {
+    x: (projected.x * 0.5 + 0.5) * VIEW_W,
+    y: (-projected.y * 0.5 + 0.5) * VIEW_H,
+    behind: projected.z > 1,
+  };
+}
+
+function draw(now) {
+  if (!zoneScene) return;
+
+  const self = rendered.get(room?.sessionId);
+  updateCamera(self);
+  updateWaterShimmer(now);
+
+  for (const [sessionId, entry] of rendered) updateCharacter3D(entry, sessionId, now);
+
+  for (const label of zoneScene.landmarkLabels) {
+    const screen = worldToScreen(label.worldX, 64, label.worldZ);
+    label.style.left = `${screen.x}px`;
+    label.style.top = `${screen.y}px`;
+    label.style.display = screen.behind ? "none" : "block";
+  }
+
+  renderer.render(scene, camera);
 }
 
 function drawOverlays(now) {
@@ -1140,10 +830,6 @@ function overlayContent() {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
 }
 
 requestAnimationFrame(frame);
